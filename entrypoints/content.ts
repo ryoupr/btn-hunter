@@ -138,10 +138,38 @@ export default defineContentScript({
       return parts.join(' > ');
     }
 
+    // アイコンのみのボタンでも識別できるよう、アクセシブルネームに近い順で名前を探す
+    function accessibleName(el: Element): string {
+      const clean = (s: string | null | undefined): string =>
+        (s ?? '').trim().replace(/\s+/g, ' ');
+      const labelledBy = el.getAttribute('aria-labelledby');
+      if (labelledBy) {
+        const byIds = labelledBy
+          .split(/\s+/)
+          .map((id) => clean(document.getElementById(id)?.textContent))
+          .filter(Boolean)
+          .join(' ');
+        if (byIds) return byIds;
+      }
+      const candidates = [
+        el.getAttribute('aria-label'),
+        el instanceof HTMLInputElement ? el.value : null,
+        el.textContent,
+        el.getAttribute('title'),
+        el.querySelector('img[alt]')?.getAttribute('alt'),
+        el.querySelector('svg title')?.textContent,
+      ];
+      for (const c of candidates) {
+        const v = clean(c);
+        if (v) return v;
+      }
+      return '';
+    }
+
     function describe(el: Element): string {
-      const text = (el.textContent ?? '').trim().replace(/\s+/g, ' ').slice(0, 40);
+      const name = accessibleName(el).slice(0, 40);
       const tag = el.tagName.toLowerCase();
-      return text ? `<${tag}> "${text}"` : `<${tag}>`;
+      return name ? `<${tag}> "${name}"` : `<${tag}>`;
     }
 
     // ---------- lock visuals ----------
@@ -246,14 +274,15 @@ export default defineContentScript({
       const shadow = modalHost.attachShadow({ mode: 'open' });
       shadow.innerHTML = `
         <style>
-          .card { background:#fff; color:#1c1c1e; border-radius:14px; padding:22px 24px; width:320px;
-                  font-family:system-ui,sans-serif; box-shadow:0 12px 40px rgba(0,0,0,.4); }
+          .card { background:#fff; color:#1c1c1e; border-radius:14px; padding:22px 24px;
+                  width:max-content; min-width:320px; max-width:min(440px, calc(100vw - 32px));
+                  box-sizing:border-box; font-family:system-ui,sans-serif; box-shadow:0 12px 40px rgba(0,0,0,.4); }
           .title { font-size:16px; font-weight:700; margin:0 0 8px; }
           .target { font-size:13px; color:#555; background:#f5f5f7; border-radius:8px;
                     padding:8px 10px; margin:0 0 12px; word-break:break-all; }
           .warn { font-size:13px; margin:0 0 16px; }
-          .row { display:flex; gap:8px; justify-content:flex-end; }
-          button { border-radius:8px; border:1px solid #ccc; padding:8px 12px;
+          .row { display:flex; flex-wrap:wrap; gap:8px; justify-content:flex-end; }
+          button { border-radius:8px; border:1px solid #ccc; padding:8px 12px; white-space:nowrap;
                    font-size:13px; cursor:pointer; background:#fff; color:#1c1c1e; }
           button.primary { background:#ff3b30; border-color:#ff3b30; color:#fff; font-weight:700; }
           button.ghost { background:transparent; }
@@ -419,26 +448,32 @@ export default defineContentScript({
     });
 
     // ---------- messages (popup / background) ----------
-    browser.runtime.onMessage.addListener((msg: unknown) => {
+    // 応答は sendResponse で返す。リスナーから Promise を返す方式は Chrome 148+ の段階的
+    // ロールアウトでしか動かないため使わない（それ以前はレスポンスが undefined になる）。
+    // https://developer.chrome.com/docs/extensions/develop/concepts/messaging
+    browser.runtime.onMessage.addListener((msg: unknown, _sender, sendResponse) => {
       const m = msg as { type?: string; selector?: string };
       if (m?.type === 'btn-hunter:toggle') {
         setHunter(!hunterMode);
-        return Promise.resolve({ hunterMode });
+        sendResponse({ hunterMode });
+        return;
       }
       if (m?.type === 'btn-hunter:state') {
-        return Promise.resolve({ hunterMode, selectors: [...locked], origin: ORIGIN });
+        sendResponse({ hunterMode, selectors: [...locked], origin: ORIGIN });
+        return;
       }
       if (m?.type === 'btn-hunter:unhunt' && typeof m.selector === 'string') {
         unhuntSelector(m.selector);
-        return Promise.resolve({ ok: true });
+        sendResponse({ ok: true });
+        return;
       }
       if (m?.type === 'btn-hunter:clear') {
         locked.clear();
         void persistLocks();
         document.querySelectorAll(`.${LOCK_CLASS}`).forEach((el) => el.classList.remove(LOCK_CLASS));
-        return Promise.resolve({ ok: true });
+        sendResponse({ ok: true });
+        return;
       }
-      return undefined;
     });
 
     // ---------- init ----------
