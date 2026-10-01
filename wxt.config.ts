@@ -10,12 +10,11 @@ export default defineConfig({
     default_locale: 'en',
     permissions: ['storage', 'activeTab'],
     commands: {
-      'toggle-hunter': {
+      'toggle-lock-mode': {
         // Chrome Manifest V3 の commands 形式
+        // suggested_key は意図的に未設定（既定キーなし）。
+        // ユーザーが chrome://extensions/shortcuts で好きなキーを割り当てる。
         // ref: https://developer.chrome.com/docs/extensions/reference/api/commands
-        suggested_key: {
-          default: 'Alt+H',
-        },
         description: '__MSG_commandToggle__',
       },
     },

@@ -1,5 +1,5 @@
-// btn-hunter content script (MVP)
-// ハンターモード → クリックでハント(ロック) → シングルクリック阻止 →
+// btn-locker content script (MVP)
+// ロックモード → クリックでロック → シングルクリック阻止 →
 // ダブルクリックで Shadow DOM 確認モーダル → 今回だけ実行 / 解除
 // 永続化は chrome.storage.local にオリジン単位でセレクタ配列を保存し、
 // MutationObserver で SPA の後付けボタンにも再適用する。
@@ -11,19 +11,19 @@ export default defineContentScript({
   runAt: 'document_start',
   main() {
     const ORIGIN = location.origin;
-    const STORE_KEY = 'btn-hunter:locks:v1';
+    const STORE_KEY = 'btn-locker:locks:v1';
     type LockDB = Record<string, string[]>;
 
     const CLICKABLE = 'button, a, input[type="button"], input[type="submit"], [role="button"]';
-    const LOCK_CLASS = 'btn-hunter-locked';
-    const AIM_CLASS = 'btn-hunter-aim';
-    const AIMING_CLASS = 'btn-hunter-aiming';
+    const LOCK_CLASS = 'btn-locker-locked';
+    const AIM_CLASS = 'btn-locker-aim';
+    const AIMING_CLASS = 'btn-locker-aiming';
 
-    let hunterMode = false;
+    let lockMode = false;
     let locked = new Set<string>();
     const bypass = new WeakSet<Element>();
-    // ハント時点の実ノード保持: SPA再描画等でセレクタが陳腐化しても取り逃がさない
-    const huntedNodes = new WeakSet<Element>();
+    // ロック時点の実ノード保持: SPA再描画等でセレクタが陳腐化しても取り逃がさない
+    const lockedNodes = new WeakSet<Element>();
     let currentAim: Element | null = null;
     let modalHost: HTMLElement | null = null;
     let toastTimer: number | undefined;
@@ -37,7 +37,8 @@ export default defineContentScript({
     // ---------- styles (programmatic injection: content.css 不要の単一ファイル構成) ----------
     const INJECTED_CSS = `
       .${AIMING_CLASS}, .${AIMING_CLASS} * {
-        cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='40' height='40' viewBox='0 0 40 40'%3E%3Cg stroke='%23ff3b30' stroke-width='2' fill='none'%3E%3Ccircle cx='20' cy='20' r='14'/%3E%3Ccircle cx='20' cy='20' r='1.5' fill='%23ff3b30' stroke='none'/%3E%3Cpath d='M20 0v10M20 30v10M0 20h10M30 20h10'/%3E%3C/g%3E%3C/svg%3E") 20 20, crosshair !important;
+        /* 南京錠カーソル (32x32, ホットスポットは錠前本体の中心) */
+        cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='32' height='32' viewBox='0 0 32 32'%3E%3Cpath d='M10 15V10a6 6 0 0 1 12 0v5' fill='none' stroke='%23fff' stroke-width='6'/%3E%3Cpath d='M10 15V10a6 6 0 0 1 12 0v5' fill='none' stroke='%23c96a00' stroke-width='3'/%3E%3Crect x='5' y='14' width='22' height='16' rx='3.5' fill='%23ff9500' stroke='%23fff' stroke-width='1.5'/%3E%3Ccircle cx='16' cy='20.5' r='2.4' fill='%23fff'/%3E%3Crect x='15' y='21.5' width='2' height='4.5' rx='1' fill='%23fff'/%3E%3C/svg%3E") 16 22, pointer !important;
       }
       .${AIM_CLASS} { outline: 3px solid #ff3b30 !important; outline-offset: 2px !important; }
       .${LOCK_CLASS} {
@@ -61,13 +62,13 @@ export default defineContentScript({
         pointer-events: none;
         z-index: 2147483646;
       }
-      @keyframes btn-hunter-shake {
+      @keyframes btn-locker-shake {
         0%,100% { transform: translateX(0); }
         25% { transform: translateX(-3px); }
         75% { transform: translateX(3px); }
       }
-      .btn-hunter-nudge { animation: btn-hunter-shake 0.25s ease 2; }
-      #btn-hunter-toast {
+      .btn-locker-nudge { animation: btn-locker-shake 0.25s ease 2; }
+      #btn-locker-toast {
         position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
         background: #1c1c1e; color: #fff; font-size: 13px;
         padding: 10px 16px; border-radius: 10px; z-index: 2147483647;
@@ -76,7 +77,7 @@ export default defineContentScript({
       }
     `;
     const styleEl = document.createElement('style');
-    styleEl.id = 'btn-hunter-style';
+    styleEl.id = 'btn-locker-style';
     styleEl.textContent = INJECTED_CSS;
     (document.head ?? document.documentElement).appendChild(styleEl);
 
@@ -127,7 +128,7 @@ export default defineContentScript({
         const rawClass: unknown =
           typeof cur.className === 'string' ? cur.className : (cur.getAttribute('class') ?? '');
         const cls = typeof rawClass === 'string' ? rawClass.split(/\s+/)[0] : '';
-        if (cls && !/btn-hunter|active|hover|focus|selected|open/i.test(cls)) {
+        if (cls && !/btn-locker|active|hover|focus|selected|open/i.test(cls)) {
           seg += `.${CSS.escape(cls)}`;
         }
         seg += `:nth-of-type(${nthOfType(cur)})`;
@@ -183,7 +184,7 @@ export default defineContentScript({
       }
     }
 
-    function unhuntSelector(sel: string): void {
+    function unlockSelector(sel: string): void {
       locked.delete(sel);
       void persistLocks();
       try {
@@ -195,40 +196,40 @@ export default defineContentScript({
 
     // ---------- toast / nudge ----------
     function toast(msg: string): void {
-      document.getElementById('btn-hunter-toast')?.remove();
+      document.getElementById('btn-locker-toast')?.remove();
       window.clearTimeout(toastTimer);
       const div = document.createElement('div');
-      div.id = 'btn-hunter-toast';
+      div.id = 'btn-locker-toast';
       div.textContent = msg;
       (document.body ?? document.documentElement).appendChild(div);
       toastTimer = window.setTimeout(() => div.remove(), 2200);
     }
 
     function nudge(el: Element): void {
-      el.classList.add('btn-hunter-nudge');
-      window.setTimeout(() => el.classList.remove('btn-hunter-nudge'), 600);
+      el.classList.add('btn-locker-nudge');
+      window.setTimeout(() => el.classList.remove('btn-locker-nudge'), 600);
       toast(t('lockedNudge'));
     }
 
-    // ---------- hunt ----------
-    function hunt(el: Element): void {
+    // ---------- lock ----------
+    function lockElement(el: Element): void {
       const sel = buildSelector(el);
-      huntedNodes.add(el);
+      lockedNodes.add(el);
       locked.add(sel);
       void persistLocks();
       applyLocks();
-      toast(t('huntDone', describe(el)));
+      toast(t('lockDone', describe(el)));
     }
 
-    function setHunter(on: boolean): void {
-      hunterMode = on;
-      console.debug('[btn-hunter] hunterMode =', on);
+    function setLockMode(on: boolean): void {
+      lockMode = on;
+      console.debug('[btn-locker] lockMode =', on);
       document.documentElement.classList.toggle(AIMING_CLASS, on);
       if (!on && currentAim) {
         currentAim.classList.remove(AIM_CLASS);
         currentAim = null;
       }
-      toast(on ? t('hunterOn') : t('hunterOff'));
+      toast(on ? t('lockModeOn') : t('lockModeOff'));
     }
 
     // ---------- modal (Shadow DOM でページCSSと隔離) ----------
@@ -240,20 +241,22 @@ export default defineContentScript({
     function openConfirmModal(el: Element, sel: string): void {
       closeModal();
       modalHost = document.createElement('div');
-      modalHost.id = 'btn-hunter-modal-host';
+      modalHost.id = 'btn-locker-modal-host';
       modalHost.style.cssText =
         'position:fixed;inset:0;z-index:2147483647;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.45);';
       const shadow = modalHost.attachShadow({ mode: 'open' });
       shadow.innerHTML = `
         <style>
-          .card { background:#fff; color:#1c1c1e; border-radius:14px; padding:22px 24px; width:320px;
+          .card { background:#fff; color:#1c1c1e; border-radius:14px; padding:22px 24px;
+                  width:400px; max-width:calc(100vw - 32px); box-sizing:border-box;
                   font-family:system-ui,sans-serif; box-shadow:0 12px 40px rgba(0,0,0,.4); }
           .title { font-size:16px; font-weight:700; margin:0 0 8px; }
           .target { font-size:13px; color:#555; background:#f5f5f7; border-radius:8px;
                     padding:8px 10px; margin:0 0 12px; word-break:break-all; }
           .warn { font-size:13px; margin:0 0 16px; }
-          .row { display:flex; gap:8px; justify-content:flex-end; }
-          button { border-radius:8px; border:1px solid #ccc; padding:8px 12px;
+          .row { display:flex; flex-wrap:wrap; gap:8px; justify-content:flex-end; }
+          /* 語の途中で折り返さない（長い言語では行ごと折り返す） */
+          button { white-space:nowrap; border-radius:8px; border:1px solid #ccc; padding:8px 12px;
                    font-size:13px; cursor:pointer; background:#fff; color:#1c1c1e; }
           button.primary { background:#ff3b30; border-color:#ff3b30; color:#fff; font-weight:700; }
           button.ghost { background:transparent; }
@@ -264,7 +267,7 @@ export default defineContentScript({
           <p class="warn" dir="auto">${t('modalWarn')}</p>
           <div class="row">
             <button class="ghost" data-act="cancel">${t('modalCancel')}</button>
-            <button data-act="unhunt">${t('modalUnhunt')}</button>
+            <button data-act="unlock">${t('modalUnlock')}</button>
             <button class="primary" data-act="run">${t('modalRun')}</button>
           </div>
         </div>
@@ -272,10 +275,10 @@ export default defineContentScript({
       (shadow.querySelector('.target') as HTMLElement).textContent = describe(el);
 
       shadow.querySelector('[data-act="cancel"]')?.addEventListener('click', closeModal);
-      shadow.querySelector('[data-act="unhunt"]')?.addEventListener('click', () => {
-        unhuntSelector(sel);
+      shadow.querySelector('[data-act="unlock"]')?.addEventListener('click', () => {
+        unlockSelector(sel);
         closeModal();
-        toast(t('unhunted'));
+        toast(t('unlocked'));
       });
       shadow.querySelector('[data-act="run"]')?.addEventListener('click', () => {
         closeModal();
@@ -311,14 +314,14 @@ export default defineContentScript({
           bypass.delete(clickable);
           return; // 「今回だけ実行する」の再発火は通す
         }
-        if (hunterMode) {
+        if (lockMode) {
           e.preventDefault();
           e.stopImmediatePropagation();
           e.stopPropagation();
-          hunt(clickable);
+          lockElement(clickable);
           return;
         }
-        if (huntedNodes.has(clickable) || matchesLocked(clickable)) {
+        if (lockedNodes.has(clickable) || matchesLocked(clickable)) {
           e.preventDefault();
           e.stopImmediatePropagation();
           e.stopPropagation();
@@ -341,14 +344,14 @@ export default defineContentScript({
         const t = e.target as Element | null;
         const clickable = t?.closest?.(CLICKABLE) as Element | null;
         if (!clickable || !document.contains(clickable)) return;
-        if (hunterMode) {
+        if (lockMode) {
           e.preventDefault();
           e.stopImmediatePropagation();
           e.stopPropagation();
           return;
         }
         let sel = findLockedSelector(clickable);
-        if (!sel && huntedNodes.has(clickable)) {
+        if (!sel && lockedNodes.has(clickable)) {
           // 同一ノード再訪だがセレクタ不一致 → 自己修復して継続
           sel = buildSelector(clickable);
           locked.add(sel);
@@ -359,24 +362,24 @@ export default defineContentScript({
           e.preventDefault();
           e.stopImmediatePropagation();
           e.stopPropagation();
-          console.debug('[btn-hunter] open modal for', sel);
+          console.debug('[btn-locker] open modal for', sel);
           openConfirmModal(clickable, sel);
         } else {
-          console.debug('[btn-hunter] dblclick missed lock:', describe(clickable));
+          console.debug('[btn-locker] dblclick missed lock:', describe(clickable));
         }
       },
       true,
     );
 
-    // ---------- hunter mode exit: 右クリック / Esc ----------
+    // ---------- lock mode exit: 右クリック / Esc ----------
     document.addEventListener(
       'contextmenu',
       (e) => {
-        if (!hunterMode) return;
+        if (!lockMode) return;
         e.preventDefault();
         e.stopImmediatePropagation();
         e.stopPropagation();
-        setHunter(false);
+        setLockMode(false);
       },
       true,
     );
@@ -384,17 +387,17 @@ export default defineContentScript({
     document.addEventListener(
       'keydown',
       (e) => {
-        if (!hunterMode || e.key !== 'Escape') return;
-        setHunter(false);
+        if (!lockMode || e.key !== 'Escape') return;
+        setLockMode(false);
       },
       true,
     );
 
-    // ---------- hunter aim highlight ----------
+    // ---------- lock mode aim highlight ----------
     document.addEventListener(
       'mouseover',
       (e) => {
-        if (!hunterMode) return;
+        if (!lockMode) return;
         const t = e.target as Element | null;
         const clickable = t?.closest?.(CLICKABLE) as Element | null;
         if (currentAim && currentAim !== clickable) currentAim.classList.remove(AIM_CLASS);
@@ -421,18 +424,18 @@ export default defineContentScript({
     // ---------- messages (popup / background) ----------
     browser.runtime.onMessage.addListener((msg: unknown) => {
       const m = msg as { type?: string; selector?: string };
-      if (m?.type === 'btn-hunter:toggle') {
-        setHunter(!hunterMode);
-        return Promise.resolve({ hunterMode });
+      if (m?.type === 'btn-locker:toggle') {
+        setLockMode(!lockMode);
+        return Promise.resolve({ lockMode });
       }
-      if (m?.type === 'btn-hunter:state') {
-        return Promise.resolve({ hunterMode, selectors: [...locked], origin: ORIGIN });
+      if (m?.type === 'btn-locker:state') {
+        return Promise.resolve({ lockMode, selectors: [...locked], origin: ORIGIN });
       }
-      if (m?.type === 'btn-hunter:unhunt' && typeof m.selector === 'string') {
-        unhuntSelector(m.selector);
+      if (m?.type === 'btn-locker:unlock' && typeof m.selector === 'string') {
+        unlockSelector(m.selector);
         return Promise.resolve({ ok: true });
       }
-      if (m?.type === 'btn-hunter:clear') {
+      if (m?.type === 'btn-locker:clear') {
         locked.clear();
         void persistLocks();
         document.querySelectorAll(`.${LOCK_CLASS}`).forEach((el) => el.classList.remove(LOCK_CLASS));

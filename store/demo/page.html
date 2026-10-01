@@ -1,0 +1,190 @@
+<!doctype html>
+<!-- ストア用スクリーンショットのデモページ（scripts/store-shots.mjs から撮影）。
+     ?scene=aim|locked|modal &lang=ja|en &content=<content.js のパス> &popup=<popup デモの URL> -->
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <title>btn-locker demo</title>
+    <style>
+      * { box-sizing: border-box; }
+      html, body { margin: 0; height: 100%; }
+      body {
+        font-family: system-ui, -apple-system, 'Hiragino Sans', 'Noto Sans JP', sans-serif;
+        background: #eef0f4; color: #1c1c1e; overflow: hidden;
+      }
+      .caption {
+        height: 104px; display: flex; align-items: center; gap: 18px;
+        padding: 0 48px; background: #1c1c1e; color: #fff;
+      }
+      .caption img { width: 56px; height: 56px; }
+      .caption .num { color: #ff9500; font-weight: 800; font-size: 30px; }
+      .caption .text { font-size: 28px; font-weight: 700; letter-spacing: .02em; }
+      .window {
+        margin: 32px 48px 0; height: 632px; background: #fff; border-radius: 14px;
+        box-shadow: 0 8px 30px rgba(0,0,0,.12); overflow: hidden;
+      }
+      .bar {
+        height: 40px; background: #f5f5f7; border-bottom: 1px solid #e3e3e8;
+        display: flex; align-items: center; gap: 8px; padding: 0 16px;
+      }
+      .dot { width: 12px; height: 12px; border-radius: 50%; background: #d1d1d6; }
+      .url {
+        margin-left: 16px; flex: 1; max-width: 520px; height: 26px; border-radius: 8px;
+        background: #fff; border: 1px solid #e3e3e8; font-size: 13px; color: #666;
+        display: flex; align-items: center; padding: 0 12px;
+      }
+      .content { padding: 28px 36px; }
+      h1 { font-size: 24px; margin: 0 0 4px; }
+      .sub { color: #6e6e73; margin: 0 0 22px; font-size: 14px; }
+      table { width: 100%; border-collapse: collapse; font-size: 15px; margin-bottom: 28px; }
+      th, td { text-align: left; padding: 12px 10px; border-bottom: 1px solid #ececf0; }
+      th { color: #6e6e73; font-weight: 600; font-size: 13px; }
+      .actions { display: flex; gap: 14px; flex-wrap: wrap; }
+      .actions button {
+        font: inherit; font-size: 16px; font-weight: 700; padding: 13px 22px;
+        border-radius: 10px; border: 1px solid #d1d1d6; background: #fff; cursor: pointer;
+      }
+      .actions .primary { background: #0a84ff; border-color: #0a84ff; color: #fff; }
+      .actions .danger { background: #ff3b30; border-color: #ff3b30; color: #fff; }
+      #popup {
+        position: fixed; top: 112px; right: 56px; width: 340px; height: 412px; border: 0;
+        border-radius: 12px; box-shadow: 0 12px 40px rgba(0,0,0,.28); background: #fff;
+      }
+      #fake-cursor { position: fixed; width: 32px; height: 32px; pointer-events: none; z-index: 2147483647; }
+    </style>
+  </head>
+  <body>
+    <div class="caption">
+      <img src="/public/icon/128.png" alt="" />
+      <span class="num" id="cap-num"></span><span class="text" id="cap-text"></span>
+    </div>
+    <div class="window">
+      <div class="bar">
+        <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+        <span class="url">https://shop-admin.example.com/orders</span>
+      </div>
+      <div class="content">
+        <h1 id="title"></h1>
+        <p class="sub" id="subtitle"></p>
+        <table>
+          <thead><tr id="thead"></tr></thead>
+          <tbody id="tbody"></tbody>
+        </table>
+        <div class="actions">
+          <button id="save"></button>
+          <button id="send-mail"></button>
+          <button id="confirm-order" class="primary"></button>
+          <button id="delete-all" class="danger"></button>
+        </div>
+      </div>
+    </div>
+
+    <script type="module">
+      import { installChromeStub, loadScript, sendToContent, lang } from './stub.js';
+
+      const params = new URLSearchParams(location.search);
+      const scene = params.get('scene') || 'aim';
+
+      const TEXT = {
+        ja: {
+          captions: {
+            aim: ['01', '押し間違えたくないボタンを、クリックするだけでロック'],
+            locked: ['02', 'ロックしたボタンは 1 クリックでは動かない'],
+            modal: ['03', 'ダブルクリック＋確認で「今回だけ」実行できる'],
+          },
+          title: '注文管理', subtitle: '未発送の注文 3 件',
+          head: ['注文番号', 'お客様', '金額', '状態'],
+          rows: [['#10234', '山田 太郎', '¥12,800', '未発送'], ['#10235', '佐藤 花子', '¥4,980', '未発送'], ['#10236', '鈴木 一郎', '¥29,700', '未発送']],
+          buttons: { save: '下書き保存', 'send-mail': 'お客様にメール送信', 'confirm-order': '注文を確定する', 'delete-all': 'すべて削除' },
+        },
+        en: {
+          captions: {
+            aim: ['01', 'Click any risky button to lock it'],
+            locked: ['02', 'Locked buttons ignore single clicks'],
+            modal: ['03', 'Double-click + confirm to run it just once'],
+          },
+          title: 'Orders', subtitle: '3 unshipped orders',
+          head: ['Order', 'Customer', 'Total', 'Status'],
+          rows: [['#10234', 'Alex Kim', '$128.00', 'Unshipped'], ['#10235', 'Maria Lopez', '$49.80', 'Unshipped'], ['#10236', 'John Smith', '$297.00', 'Unshipped']],
+          buttons: { save: 'Save draft', 'send-mail': 'Email customers', 'confirm-order': 'Confirm orders', 'delete-all': 'Delete all' },
+        },
+      };
+      const tx = TEXT[lang] ?? TEXT.en;
+
+      const [num, cap] = tx.captions[scene];
+      document.getElementById('cap-num').textContent = num;
+      document.getElementById('cap-text').textContent = cap;
+      document.getElementById('title').textContent = tx.title;
+      document.getElementById('subtitle').textContent = tx.subtitle;
+      for (const h of tx.head) {
+        const th = document.createElement('th');
+        th.textContent = h;
+        document.getElementById('thead').appendChild(th);
+      }
+      for (const row of tx.rows) {
+        const tr = document.createElement('tr');
+        for (const c of row) {
+          const td = document.createElement('td');
+          td.textContent = c;
+          tr.appendChild(td);
+        }
+        document.getElementById('tbody').appendChild(tr);
+      }
+      for (const [id, label] of Object.entries(tx.buttons)) {
+        document.getElementById(id).textContent = label;
+      }
+
+      const fire = (el, type) =>
+        el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window, detail: type === 'dblclick' ? 2 : 1 }));
+      const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+
+      await installChromeStub();
+      await loadScript(params.get('content'));
+      await wait(50);
+
+      const del = document.getElementById('delete-all');
+      const confirmBtn = document.getElementById('confirm-order');
+
+      // ロックモードでボタンを 2 つロックしてからモード終了
+      async function lockTwo() {
+        await sendToContent({ type: 'btn-locker:toggle' });
+        fire(confirmBtn, 'click');
+        fire(del, 'click');
+        await sendToContent({ type: 'btn-locker:toggle' });
+      }
+
+      if (scene === 'aim') {
+        await sendToContent({ type: 'btn-locker:toggle' });
+        fire(del, 'mouseover');
+        // ヘッドレス撮影ではマウスカーソルが写らないため、実際のカーソル画像を同じ位置に重ねる
+        const css = [...document.styleSheets].flatMap((s) => [...s.cssRules]).map((r) => r.cssText).join('\n');
+        const url = css.match(/url\("(data:image\/svg\+xml[^"]+)"\)/)?.[1];
+        if (url) {
+          const r = del.getBoundingClientRect();
+          const img = document.createElement('img');
+          img.id = 'fake-cursor';
+          img.src = url;
+          img.style.left = `${r.right - 14}px`;
+          img.style.top = `${r.bottom - 12}px`;
+          document.body.appendChild(img);
+        }
+      } else if (scene === 'locked') {
+        await lockTwo();
+        await wait(50);
+        fire(del, 'click'); // 1 クリックは阻止され、トーストが出る
+        const popup = params.get('popup');
+        if (popup) {
+          const iframe = document.createElement('iframe');
+          iframe.id = 'popup';
+          iframe.src = popup;
+          document.body.appendChild(iframe);
+        }
+      } else if (scene === 'modal') {
+        await lockTwo();
+        await wait(50);
+        fire(del, 'dblclick');
+        document.getElementById('btn-locker-toast')?.remove();
+      }
+    </script>
+  </body>
+</html>
