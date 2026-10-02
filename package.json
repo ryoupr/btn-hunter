@@ -1,5 +1,5 @@
 {
-  "name": "btn-hunter",
+  "name": "btn-locker",
   "description": "うっかり押し・事故タップを防ぐボタン誤爆防止セーフティChrome拡張機能",
   "private": true,
   "version": "0.1.0",
@@ -12,6 +12,7 @@
     "zip": "wxt zip",
     "zip:firefox": "wxt zip -b firefox",
     "compile": "tsc --noEmit",
+    "store:shots": "wxt build && node scripts/store-shots.mjs ja && node scripts/store-shots.mjs en",
     "postinstall": "wxt prepare"
   },
   "devDependencies": {

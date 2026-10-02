@@ -9,8 +9,8 @@ if ((browser.i18n.getUILanguage?.() ?? 'en').toLowerCase().startsWith('ar')) {
   document.documentElement.dir = 'rtl';
 }
 
-interface HunterState {
-  hunterMode: boolean;
+interface LockerState {
+  lockMode: boolean;
   selectors: string[];
   origin: string;
 }
@@ -46,10 +46,10 @@ async function render() {
   })();
 
   const state =
-    tab?.id != null ? await sendToTab<HunterState>(tab.id, { type: 'btn-hunter:state' }) : null;
+    tab?.id != null ? await sendToTab<LockerState>(tab.id, { type: 'btn-locker:state' }) : null;
 
   app.innerHTML = '';
-  app.appendChild(el(`<h1>🎯 btn-hunter</h1>`));
+  app.appendChild(el(`<h1>🔒 btn-locker</h1>`));
   app.appendChild(el(`<p class="sub">${t('popupSubtitle')}</p>`));
 
   if (!tab?.id || !state) {
@@ -58,12 +58,12 @@ async function render() {
   }
 
   const toggleBtn = el(
-    `<button class="toggle ${state.hunterMode ? 'on' : ''}">${state.hunterMode ? t('stopHunt') : t('startHunt')}</button>`,
+    `<button class="toggle ${state.lockMode ? 'on' : ''}">${state.lockMode ? t('stopLockMode') : t('startLockMode')}</button>`,
   );
   toggleBtn.addEventListener('click', async () => {
-    const res = await sendToTab<{ hunterMode: boolean }>(tab.id!, { type: 'btn-hunter:toggle' });
-    if (res?.hunterMode) {
-      // ハンターモード開始が確定 → ポップアップを閉じてすぐハントできるようにする
+    const res = await sendToTab<{ lockMode: boolean }>(tab.id!, { type: 'btn-locker:toggle' });
+    if (res?.lockMode) {
+      // ロックモード開始が確定 → ポップアップを閉じてすぐロックできるようにする
       window.close();
       return;
     }
@@ -84,10 +84,10 @@ async function render() {
     for (const sel of state.selectors) {
       const li = el(`<li><code></code><button></button></li>`);
       (li.querySelector('code') as HTMLElement).textContent = sel;
-      const unhuntBtn = li.querySelector('button')!;
-      unhuntBtn.textContent = t('unhunt');
-      unhuntBtn.addEventListener('click', async () => {
-        await sendToTab(tab.id!, { type: 'btn-hunter:unhunt', selector: sel });
+      const unlockBtn = li.querySelector('button')!;
+      unlockBtn.textContent = t('unlock');
+      unlockBtn.addEventListener('click', async () => {
+        await sendToTab(tab.id!, { type: 'btn-locker:unlock', selector: sel });
         await render();
       });
       ul.appendChild(li);
@@ -97,7 +97,7 @@ async function render() {
     const clearBtn = el(`<button class="clear"></button>`);
     clearBtn.textContent = t('clearAll');
     clearBtn.addEventListener('click', async () => {
-      await sendToTab(tab.id!, { type: 'btn-hunter:clear' });
+      await sendToTab(tab.id!, { type: 'btn-locker:clear' });
       await render();
     });
     app.appendChild(clearBtn);

@@ -1,0 +1,31 @@
+<!doctype html>
+<!-- ストア用プロモーションタイル (small 440x280)。?lang=ja|en -->
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <style>
+      html, body { margin: 0; width: 440px; height: 280px; overflow: hidden; }
+      body {
+        font-family: system-ui, -apple-system, 'Hiragino Sans', 'Noto Sans JP', sans-serif;
+        background: linear-gradient(135deg, #1c1c1e 0%, #2c2c30 100%); color: #fff;
+        display: flex; align-items: center; gap: 22px; padding: 0 34px; box-sizing: border-box;
+      }
+      img { width: 112px; height: 112px; flex: none; }
+      .name { font-size: 34px; font-weight: 800; letter-spacing: .01em; margin: 0; }
+      .name span { color: #ff9500; }
+      .tag { font-size: 18px; font-weight: 700; margin: 10px 0 0; line-height: 1.45; color: #f2f2f7; }
+    </style>
+  </head>
+  <body>
+    <img src="/public/icon/128.png" alt="" />
+    <div>
+      <p class="name">btn-<span>locker</span></p>
+      <p class="tag" id="tag"></p>
+    </div>
+    <script>
+      const lang = new URLSearchParams(location.search).get('lang') || 'ja';
+      document.getElementById('tag').innerHTML =
+        lang === 'ja' ? '押し間違えたくないボタンを<br>ロックして誤クリック防止' : 'Lock risky buttons.<br>Stop misclicks.';
+    </script>
+  </body>
+</html>

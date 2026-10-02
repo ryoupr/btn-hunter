@@ -1,0 +1,32 @@
+<!doctype html>
+<!-- ストア用スクリーンショット: ビルド済みポップアップをスタブ上で表示する。
+     ?lang=ja|en &chunk=<popup chunk のパス> &css=<popup CSS のパス> -->
+<html>
+  <head>
+    <meta charset="UTF-8" />
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module">
+      import { installChromeStub } from './stub.js';
+
+      const params = new URLSearchParams(location.search);
+      const link = document.createElement('link');
+      link.rel = 'stylesheet';
+      link.href = params.get('css');
+      document.head.appendChild(link);
+
+      await installChromeStub({
+        tabState: {
+          url: 'https://shop-admin.example.com/orders',
+          response: {
+            lockMode: false,
+            selectors: ['#confirm-order', '#delete-all'],
+            origin: 'https://shop-admin.example.com',
+          },
+        },
+      });
+      await import(params.get('chunk'));
+    </script>
+  </body>
+</html>
