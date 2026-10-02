@@ -86,10 +86,80 @@ h2 {
   margin-bottom: 6px;
 }
 
-.locks code {
+.locks .info {
   flex: 1;
-  font-size: 11px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.locks .name {
+  font-size: 13px;
+  font-weight: 600;
   word-break: break-all;
+}
+
+.locks code {
+  font-size: 10px;
+  color: #777;
+  word-break: break-all;
+}
+
+.locks .frame {
+  font-size: 10px;
+  color: #a60;
+  word-break: break-all;
+}
+
+.pause {
+  text-align: start;
+}
+
+.pause h2 {
+  margin: 12px 0 6px;
+}
+
+.switch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  padding: 4px 0;
+  cursor: pointer;
+}
+
+.banner {
+  background: #fff3cd;
+  border: 2px solid #ff9500;
+  color: #7a4a00;
+  border-radius: 10px;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 8px 10px;
+  margin: 0 0 10px;
+}
+
+.toggle:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.clear.danger {
+  background: #ff3b30;
+  border-color: #ff3b30;
+  color: #fff;
+  font-weight: 700;
+}
+
+.options-link {
+  margin-top: 12px;
+  background: none;
+  border: none;
+  color: #0a60d0;
+  font-size: 12px;
+  text-decoration: underline;
+  cursor: pointer;
 }
 
 .locks button,

@@ -1,0 +1,97 @@
+:root {
+  font-family: system-ui, sans-serif;
+  color: #1c1c1e;
+  background: #fff;
+}
+
+body {
+  margin: 0;
+}
+
+#app {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 24px 16px 48px;
+}
+
+h1 {
+  font-size: 20px;
+  margin: 0 0 20px;
+}
+
+section {
+  border: 1px solid #ddd;
+  border-radius: 12px;
+  padding: 16px;
+  margin-bottom: 16px;
+}
+
+h2 {
+  font-size: 15px;
+  margin: 0 0 8px;
+}
+
+p {
+  font-size: 13px;
+  color: #555;
+  margin: 0 0 12px;
+}
+
+button {
+  border-radius: 8px;
+  border: 1px solid #ccc;
+  background: #fff;
+  font-size: 13px;
+  padding: 8px 14px;
+  cursor: pointer;
+}
+
+button.primary {
+  background: #ff3b30;
+  border-color: #ff3b30;
+  color: #fff;
+  font-weight: 700;
+}
+
+fieldset {
+  border: none;
+  padding: 0;
+  margin: 12px 0;
+}
+
+legend {
+  font-size: 13px;
+  font-weight: 600;
+  padding: 0;
+  margin-bottom: 6px;
+}
+
+.opt {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  font-size: 13px;
+  margin-bottom: 6px;
+}
+
+label.file {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+#status {
+  font-size: 13px;
+  min-height: 1.4em;
+  margin-top: 8px;
+}
+
+#status.ok {
+  color: #1a7f37;
+}
+
+#status.err {
+  color: #c62828;
+  font-weight: 600;
+}

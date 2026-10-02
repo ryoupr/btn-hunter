@@ -1,32 +1,88 @@
-// btn-locker content script (MVP)
+// btn-locker content script
 // ロックモード → クリックでロック → シングルクリック阻止 →
 // ダブルクリックで Shadow DOM 確認モーダル → 今回だけ実行 / 解除
-// 永続化は chrome.storage.local にオリジン単位でセレクタ配列を保存し、
-// MutationObserver で SPA の後付けボタンにも再適用する。
+// 永続化は chrome.storage.local に「トップのオリジン」単位で {s, f, n} を保存し、
+// MutationObserver (ロックがあるときだけ) で SPA の後付けボタンにも再適用する。
+// iframe: allFrames で各フレームに注入。自フレームのオリジン(f)のエントリだけを適用する。
+// Shadow DOM: composedPath() で open な shadow root 内の要素を検出し、
+//   "ホスト >>> 内部" 形式のパスで保存・再解決する (utils/selector.ts)。
+
+import {
+  LOCKS_KEY,
+  LOCKS_KEY_V1,
+  PAUSE_KEY,
+  LIMITS,
+  isPausedFor,
+  readLocks,
+  readPause,
+  type LockEntry,
+  type PauseState,
+} from '../utils/storage';
+import { buildPath, matchesPath, queryPath } from '../utils/selector';
 
 export default defineContentScript({
   matches: ['<all_urls>'],
+  allFrames: true,
   // document_start: パース開始時点で阻止リスナーを先登録し、
   // ロック適用までの「素通しウィンドウ」を最小化する
   runAt: 'document_start',
   main() {
-    const ORIGIN = location.origin;
-    const STORE_KEY = 'btn-locker:locks:v1';
-    type LockDB = Record<string, string[]>;
+    const FRAME_ORIGIN = location.origin;
+    const IS_TOP = window === window.top;
+    // 保存キーはトップレベルのオリジン。iframe 内では ancestorOrigins の最後の要素 (= トップ)
+    const TOP_ORIGIN = IS_TOP
+      ? location.origin
+      : ((): string => {
+          const ao = location.ancestorOrigins;
+          return (ao && ao.length > 0 ? ao[ao.length - 1] : '') || location.origin;
+        })();
 
-    const CLICKABLE = 'button, a, input[type="button"], input[type="submit"], [role="button"]';
+    const CLICKABLE = [
+      'button',
+      'a',
+      'input[type="button"]',
+      'input[type="submit"]',
+      'input[type="image"]',
+      'input[type="reset"]',
+      'summary',
+      '[role="button"]',
+      '[role="link"]',
+      '[role="menuitem"]',
+      '[onclick]',
+    ].join(', ');
     const LOCK_CLASS = 'btn-locker-locked';
     const AIM_CLASS = 'btn-locker-aim';
     const AIMING_CLASS = 'btn-locker-aiming';
+    const PRESS_EVENTS = [
+      'pointerdown',
+      'mousedown',
+      'pointerup',
+      'mouseup',
+      'touchstart',
+      'touchend',
+    ] as const;
 
     let lockMode = false;
-    let locked = new Set<string>();
-    const bypass = new WeakSet<Element>();
-    // ロック時点の実ノード保持: SPA再描画等でセレクタが陳腐化しても取り逃がさない
-    const lockedNodes = new WeakSet<Element>();
+    // このフレームに適用するエントリ (f === FRAME_ORIGIN)
+    let mine: LockEntry[] = [];
+    // 同じトップオリジンの他フレームのエントリ数 (上限判定は storage 側と同じトップオリジン単位)
+    let othersTotal = 0;
+    const topTotal = (): number => othersTotal + mine.length;
+    let pause: PauseState = { global: false, sites: [] };
+    // ロック時点の実ノード → そのノードを指していたセレクタ群。
+    // SPA再描画等でセレクタが陳腐化しても取り逃がさず、自己修復時に古いセレクタを整理する
+    const lockedNodes = new Map<Element, Set<string>>();
+    const appliedNodes = new Set<Element>();
+    const styledRoots = new WeakSet<Node>();
+    // 「今回だけ実行」中のみ設定。阻止ハンドラ(click / pointer / mouse 系)はこの要素を通す
+    let bypassEl: Element | null = null;
     let currentAim: Element | null = null;
     let modalHost: HTMLElement | null = null;
+    let modalShadow: ShadowRoot | null = null;
+    let modalPrevFocus: Element | null = null;
     let toastTimer: number | undefined;
+
+    const isPaused = (): boolean => isPausedFor(pause, TOP_ORIGIN);
 
     // i18n: ブラウザ表示言語の messages.json から取得 (該当なし→default_localeのen)
     // キー型は messages.json から自動生成される union に合わせる
@@ -81,73 +137,63 @@ export default defineContentScript({
     styleEl.textContent = INJECTED_CSS;
     (document.head ?? document.documentElement).appendChild(styleEl);
 
+    // shadow root 内の要素にもロック/狙いの見た目を効かせるため、root ごとに style を入れる
+    function ensureStyle(el: Element): void {
+      const root = el.getRootNode();
+      if (!(root instanceof ShadowRoot) || styledRoots.has(root)) return;
+      styledRoots.add(root);
+      const s = document.createElement('style');
+      s.setAttribute('data-btn-locker', '');
+      s.textContent = INJECTED_CSS;
+      root.appendChild(s);
+    }
+
     // ---------- storage ----------
-    async function loadLocks(): Promise<void> {
+    async function loadAll(): Promise<void> {
       try {
-        const got = (await browser.storage.local.get(STORE_KEY)) as Partial<
-          Record<string, LockDB[string]>
-        >;
-        const arr = (got?.[STORE_KEY] as unknown as LockDB | undefined)?.[ORIGIN] ?? [];
-        locked = new Set(Array.isArray(arr) ? arr : []);
+        const [db, p] = await Promise.all([readLocks(), readPause()]);
+        const all = db[TOP_ORIGIN] ?? [];
+        mine = all.filter((e) => e.f === FRAME_ORIGIN);
+        othersTotal = all.length - mine.length;
+        pause = p;
       } catch {
-        locked = new Set();
+        mine = [];
+        othersTotal = 0;
+        pause = { global: false, sites: [] };
       }
+      // 解除済み(エントリが無くなった)ノードの保持を捨てる
+      const live = new Set(mine.map((e) => e.s));
+      for (const [node, sels] of lockedNodes) {
+        for (const s of sels) if (!live.has(s)) sels.delete(s);
+        if (sels.size === 0) lockedNodes.delete(node);
+      }
+      if (isPaused() && lockMode) setLockMode(false);
+      applyLocks();
+      syncObserver();
     }
 
-    async function persistLocks(): Promise<void> {
+    // 書き込みは background に集約 (Web Locks は content script と拡張機能のオリジン間で共有されない)
+    function persist(op: { add?: LockEntry[]; remove?: string[] }): void {
       try {
-        const got = (await browser.storage.local.get(STORE_KEY)) as Partial<
-          Record<string, LockDB>
-        >;
-        const db = ((got?.[STORE_KEY] as unknown as LockDB | undefined) ?? {}) as LockDB;
-        db[ORIGIN] = [...locked];
-        await browser.storage.local.set({ [STORE_KEY]: db });
+        void browser.runtime
+          .sendMessage({ type: 'btn-locker:mutate', top: TOP_ORIGIN, f: FRAME_ORIGIN, ...op })
+          .catch(() => undefined);
       } catch {
-        /* storage 利用不可でも動作は継続 */
+        /* 拡張が再読み込みされた直後など。動作は継続 */
       }
     }
 
-    // ---------- selector ----------
-    function nthOfType(el: Element): number {
-      let i = 1;
-      let sib = el.previousElementSibling;
-      while (sib) {
-        if (sib.tagName === el.tagName) i++;
-        sib = sib.previousElementSibling;
-      }
-      return i;
-    }
-
-    function buildSelector(el: Element): string {
-      if (el.id) return `#${CSS.escape(el.id)}`;
-      const parts: string[] = [];
-      let cur: Element | null = el;
-      let depth = 0;
-      while (cur && cur !== document.body && cur !== document.documentElement && depth < 6) {
-        let seg = cur.tagName.toLowerCase();
-        const rawClass: unknown =
-          typeof cur.className === 'string' ? cur.className : (cur.getAttribute('class') ?? '');
-        const cls = typeof rawClass === 'string' ? rawClass.split(/\s+/)[0] : '';
-        if (cls && !/btn-locker|active|hover|focus|selected|open/i.test(cls)) {
-          seg += `.${CSS.escape(cls)}`;
-        }
-        seg += `:nth-of-type(${nthOfType(cur)})`;
-        parts.unshift(seg);
-        cur = cur.parentElement;
-        depth++;
-      }
-      return parts.join(' > ');
-    }
-
+    // ---------- naming ----------
     // アイコンのみのボタンでも識別できるよう、アクセシブルネームに近い順で名前を探す
     function accessibleName(el: Element): string {
       const clean = (s: string | null | undefined): string =>
         (s ?? '').trim().replace(/\s+/g, ' ');
+      const root = el.getRootNode() as Document | ShadowRoot;
       const labelledBy = el.getAttribute('aria-labelledby');
       if (labelledBy) {
         const byIds = labelledBy
           .split(/\s+/)
-          .map((id) => clean(document.getElementById(id)?.textContent))
+          .map((id) => clean(root.getElementById?.(id)?.textContent))
           .filter(Boolean)
           .join(' ');
         if (byIds) return byIds;
@@ -157,6 +203,7 @@ export default defineContentScript({
         el instanceof HTMLInputElement ? el.value : null,
         el.textContent,
         el.getAttribute('title'),
+        el.getAttribute('alt'),
         el.querySelector('img[alt]')?.getAttribute('alt'),
         el.querySelector('svg title')?.textContent,
       ];
@@ -168,57 +215,42 @@ export default defineContentScript({
     }
 
     function describe(el: Element): string {
-      const name = accessibleName(el).slice(0, 40);
+      const name = accessibleName(el).slice(0, LIMITS.maxName);
       const tag = el.tagName.toLowerCase();
       return name ? `<${tag}> "${name}"` : `<${tag}>`;
     }
 
     // ---------- lock visuals ----------
-    function matchesLocked(el: Element): boolean {
-      if (el.classList.contains(LOCK_CLASS)) return true;
-      for (const sel of locked) {
-        try {
-          if (el.matches(sel)) return true;
-        } catch {
-          /* 不正セレクタは無視 */
-        }
-      }
-      return false;
+    function isLocked(el: Element): boolean {
+      if (lockedNodes.has(el)) return true;
+      return mine.some((e) => matchesPath(el, e.s));
     }
 
     function applyLocks(): void {
-      // 外れた要素の掃除
-      document.querySelectorAll(`.${LOCK_CLASS}`).forEach((el) => {
-        let still = false;
-        for (const sel of locked) {
-          try {
-            if ((el as Element).matches(sel)) {
-              still = true;
-              break;
-            }
-          } catch {
-            /* ignore */
-          }
-        }
-        if (!still) el.classList.remove(LOCK_CLASS);
-      });
-      // 現行ロックの適用
-      for (const sel of locked) {
-        try {
-          document.querySelectorAll(sel).forEach((el) => el.classList.add(LOCK_CLASS));
-        } catch {
-          /* ignore */
+      if (isPaused()) {
+        // 一時停止中: 見た目を外す (ロックの定義は保持)
+        appliedNodes.forEach((el) => el.classList.remove(LOCK_CLASS));
+        appliedNodes.clear();
+        return;
+      }
+      const want = new Set<Element>();
+      for (const e of mine) {
+        for (const el of queryPath(e.s, document, observeRoot)) want.add(el);
+      }
+      for (const el of lockedNodes.keys()) {
+        if (el.isConnected) want.add(el);
+        else lockedNodes.delete(el);
+      }
+      for (const el of appliedNodes) {
+        if (!want.has(el)) {
+          el.classList.remove(LOCK_CLASS);
+          appliedNodes.delete(el);
         }
       }
-    }
-
-    function unlockSelector(sel: string): void {
-      locked.delete(sel);
-      void persistLocks();
-      try {
-        document.querySelectorAll(sel).forEach((el) => el.classList.remove(LOCK_CLASS));
-      } catch {
-        /* ignore */
+      for (const el of want) {
+        ensureStyle(el);
+        el.classList.add(LOCK_CLASS);
+        appliedNodes.add(el);
       }
     }
 
@@ -239,40 +271,185 @@ export default defineContentScript({
       toast(t('lockedNudge'));
     }
 
-    // ---------- lock ----------
+    // ---------- lock / unlock ----------
+    function trackNode(el: Element, sel: string): void {
+      const set = lockedNodes.get(el) ?? new Set<string>();
+      set.add(sel);
+      lockedNodes.set(el, set);
+    }
+
     function lockElement(el: Element): void {
-      const sel = buildSelector(el);
-      lockedNodes.add(el);
-      locked.add(sel);
-      void persistLocks();
+      const sel = buildPath(el);
+      const name = accessibleName(el).slice(0, LIMITS.maxName) || `<${el.tagName.toLowerCase()}>`;
+      const entry: LockEntry = { s: sel, f: FRAME_ORIGIN, n: name };
+      if (!mine.some((e) => e.s === sel)) {
+        if (topTotal() >= LIMITS.maxPerOrigin) {
+          // 上限: 保存せず、lockedNodes にも入れない
+          toast(t('lockLimit', String(LIMITS.maxPerOrigin)));
+          return;
+        }
+        mine.push(entry);
+      }
+      trackNode(el, sel);
+      persist({ add: [entry] });
       applyLocks();
+      syncObserver();
       toast(t('lockDone', describe(el)));
     }
 
+    // セレクタが陳腐化して実ノードだけ残っている場合の自己修復:
+    // 新しいセレクタを追加し、同じ実ノードを指していた古いセレクタのうち
+    // どの要素にも一致しなくなったものは置き換える (データを溜めない)
+    function healNode(el: Element): string {
+      const sel = buildPath(el);
+      const olds = lockedNodes.get(el) ?? new Set<string>();
+      const stale = [...olds].filter((o) => o !== sel && queryPath(o).length === 0);
+      for (const o of stale) olds.delete(o);
+      const entry: LockEntry = {
+        s: sel,
+        f: FRAME_ORIGIN,
+        n: accessibleName(el).slice(0, LIMITS.maxName) || `<${el.tagName.toLowerCase()}>`,
+      };
+      mine = mine.filter((e) => !stale.includes(e.s));
+      let add: LockEntry[] = [];
+      if (!mine.some((e) => e.s === sel)) {
+        if (topTotal() >= LIMITS.maxPerOrigin) {
+          if (stale.length) persist({ remove: stale });
+          applyLocks();
+          return sel; // 上限: 追加しない (ノードは追跡しない)
+        }
+        mine.push(entry);
+        add = [entry];
+      }
+      trackNode(el, sel);
+      persist({ add, remove: stale });
+      applyLocks();
+      syncObserver();
+      return sel;
+    }
+
+    function unlockSelector(sel: string): void {
+      mine = mine.filter((e) => e.s !== sel);
+      for (const [node, sels] of lockedNodes) {
+        sels.delete(sel);
+        if (sels.size === 0) lockedNodes.delete(node);
+      }
+      persist({ remove: [sel] });
+      applyLocks();
+      syncObserver();
+    }
+
+    // 「解除」: その要素に一致するエントリをすべて外す (同じ要素を指す別セレクタが残らないように)
+    function unlockElement(el: Element, sel: string): void {
+      const sels = new Set<string>([sel, ...(lockedNodes.get(el) ?? [])]);
+      for (const e of mine) if (matchesPath(el, e.s)) sels.add(e.s);
+      lockedNodes.delete(el);
+      mine = mine.filter((e) => !sels.has(e.s));
+      for (const [node, set] of lockedNodes) {
+        for (const x of sels) set.delete(x);
+        if (set.size === 0) lockedNodes.delete(node);
+      }
+      persist({ remove: [...sels] });
+      applyLocks();
+      syncObserver();
+    }
+
+    // ポップアップで selector のエントリが消された後の後始末: そのセレクタが指していた要素に
+    // 別のエントリが一致して、まだロックされているならそれも外す
+    function unlockedFromPopup(sel: string): void {
+      const els = new Set<Element>(queryPath(sel));
+      for (const [node, set] of lockedNodes) if (set.has(sel)) els.add(node);
+      for (const el of els) unlockElement(el, sel);
+      unlockSelector(sel);
+    }
+
+    // ロック済みなら、その要素に対応するセレクタを返す (実ノードのみ残っている場合は自己修復)
+    function selectorFor(el: Element): string | null {
+      for (const e of mine) if (matchesPath(el, e.s)) return e.s;
+      if (lockedNodes.has(el)) return healNode(el);
+      return null;
+    }
+
+    // ---------- lock mode ----------
     function setLockMode(on: boolean): void {
+      if (on && isPaused()) {
+        if (IS_TOP) toast(t('pausedNotice'));
+        return;
+      }
+      if (lockMode === on) return;
       lockMode = on;
-      console.debug('[btn-locker] lockMode =', on);
+      console.debug('[btn-locker] lockMode =', on, IS_TOP ? '(top)' : '(frame)');
       document.documentElement.classList.toggle(AIMING_CLASS, on);
       if (!on && currentAim) {
         currentAim.classList.remove(AIM_CLASS);
         currentAim = null;
       }
-      toast(on ? t('lockModeOn') : t('lockModeOff'));
+      // トーストは重複を避けるためトップフレームのみ
+      if (IS_TOP) toast(on ? t('lockModeOn') : t('lockModeOff'));
+    }
+
+    // Esc / 右クリックによる終了: 自フレームを OFF にし、background 経由で全フレームへ伝える
+    function exitByUser(): void {
+      setLockMode(false);
+      try {
+        void browser.runtime.sendMessage({ type: 'btn-locker:mode-exit' }).catch(() => undefined);
+      } catch {
+        /* 拡張が再読み込みされた直後など */
+      }
     }
 
     // ---------- modal (Shadow DOM でページCSSと隔離) ----------
     function closeModal(): void {
       modalHost?.remove();
       modalHost = null;
+      modalShadow = null;
+      const prev = modalPrevFocus;
+      modalPrevFocus = null;
+      if (prev && prev.isConnected) (prev as HTMLElement).focus?.();
+    }
+
+    function deepActiveElement(): Element | null {
+      let a: Element | null = document.activeElement;
+      while (a?.shadowRoot?.activeElement) a = a.shadowRoot.activeElement;
+      return a;
+    }
+
+    function runOnce(el: Element): void {
+      // click だけでなく pointer / mouse 系も本来どおり発火させる。
+      // bypassEl が立っている間は、阻止ハンドラが全てこの要素を素通しする。
+      bypassEl = el;
+      try {
+        const r = el.getBoundingClientRect();
+        const base = {
+          bubbles: true,
+          cancelable: true,
+          composed: true,
+          view: window,
+          button: 0,
+          clientX: r.left + r.width / 2,
+          clientY: r.top + r.height / 2,
+        };
+        const ptr = { pointerType: 'mouse', isPrimary: true, pointerId: 1 };
+        el.dispatchEvent(new PointerEvent('pointerdown', { ...base, ...ptr, buttons: 1 }));
+        el.dispatchEvent(new MouseEvent('mousedown', { ...base, buttons: 1 }));
+        el.dispatchEvent(new PointerEvent('pointerup', { ...base, ...ptr, buttons: 0 }));
+        el.dispatchEvent(new MouseEvent('mouseup', { ...base, buttons: 0 }));
+        if (typeof (el as HTMLElement).click === 'function') (el as HTMLElement).click();
+        else el.dispatchEvent(new MouseEvent('click', { ...base, buttons: 0 }));
+      } finally {
+        bypassEl = null;
+      }
     }
 
     function openConfirmModal(el: Element, sel: string): void {
       closeModal();
+      modalPrevFocus = deepActiveElement();
       modalHost = document.createElement('div');
       modalHost.id = 'btn-locker-modal-host';
       modalHost.style.cssText =
         'position:fixed;inset:0;z-index:2147483647;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.45);';
       const shadow = modalHost.attachShadow({ mode: 'open' });
+      modalShadow = shadow;
       shadow.innerHTML = `
         <style>
           .card { background:#fff; color:#1c1c1e; border-radius:14px; padding:22px 24px;
@@ -288,9 +465,10 @@ export default defineContentScript({
                    font-size:13px; cursor:pointer; background:#fff; color:#1c1c1e; }
           button.primary { background:#ff3b30; border-color:#ff3b30; color:#fff; font-weight:700; }
           button.ghost { background:transparent; }
+          button:focus-visible { outline:3px solid #0a84ff; outline-offset:2px; }
         </style>
-        <div class="card">
-          <p class="title" dir="auto">${t('modalTitle')}</p>
+        <div class="card" role="dialog" aria-modal="true" aria-labelledby="btn-locker-modal-title">
+          <p class="title" id="btn-locker-modal-title" dir="auto">${t('modalTitle')}</p>
           <p class="target" dir="auto"></p>
           <p class="warn" dir="auto">${t('modalWarn')}</p>
           <div class="row">
@@ -304,149 +482,247 @@ export default defineContentScript({
 
       shadow.querySelector('[data-act="cancel"]')?.addEventListener('click', closeModal);
       shadow.querySelector('[data-act="unlock"]')?.addEventListener('click', () => {
-        unlockSelector(sel);
+        unlockElement(el, sel);
         closeModal();
         toast(t('unlocked'));
       });
       shadow.querySelector('[data-act="run"]')?.addEventListener('click', () => {
         closeModal();
-        // capture フェーズの阻止を一度だけ回避して本来のクリックを発火
-        bypass.add(el);
-        (el as HTMLElement).click();
+        runOnce(el);
       });
       modalHost.addEventListener('click', (e) => {
         if (e.target === modalHost) closeModal();
       });
       (document.body ?? document.documentElement).appendChild(modalHost);
+      // 初期フォーカスは「キャンセル」(誤操作で実行されないように)
+      (shadow.querySelector('[data-act="cancel"]') as HTMLElement | null)?.focus();
     }
 
-    function findLockedSelector(el: Element): string | null {
-      for (const sel of locked) {
-        try {
-          if ((el as Element).matches(sel)) return sel;
-        } catch {
-          /* ignore */
-        }
+    // ---------- event helpers ----------
+    // closest() ではなく composedPath() を使い、open な shadow root 内の要素も扱う
+    function pathElements(e: Event): Element[] {
+      return e.composedPath().filter((n): n is Element => n instanceof Element);
+    }
+
+    function isClickable(el: Element): boolean {
+      if (!el.isConnected || el === document.body || el === document.documentElement) return false;
+      try {
+        return el.matches(CLICKABLE);
+      } catch {
+        return false;
       }
-      return el.classList.contains(LOCK_CLASS) ? buildSelector(el) : null;
     }
 
-    // ---------- event interception (capture phase) ----------
-    document.addEventListener(
+    const firstClickable = (els: Element[]): Element | null =>
+      els.find((el) => isClickable(el)) ?? null;
+    const firstLocked = (els: Element[]): Element | null =>
+      els.find((el) => isClickable(el) && isLocked(el)) ?? null;
+
+    // モーダル内のイベント / 「今回だけ実行」中の再発火は阻止の対象外
+    function exempt(els: Element[]): boolean {
+      if (modalHost && els.includes(modalHost)) return true;
+      if (bypassEl && els.includes(bypassEl)) return true;
+      return false;
+    }
+
+    function swallow(e: Event, prevent = true): void {
+      if (prevent && e.cancelable) e.preventDefault();
+      e.stopImmediatePropagation();
+      e.stopPropagation();
+    }
+
+    // ---------- event interception (capture phase, window で最優先に受ける) ----------
+    // pointerdown / mousedown 等ですり抜けないよう、ロック中の要素(およびロックモードの狙い先)の
+    // press 系イベントも止める。touch 系は preventDefault するとスクロール等を壊すため伝播停止のみ。
+    for (const type of PRESS_EVENTS) {
+      window.addEventListener(
+        type,
+        (e) => {
+          if (isPaused()) return;
+          const els = pathElements(e);
+          if (exempt(els)) return;
+          const target = lockMode ? firstClickable(els) : firstLocked(els);
+          if (!target) return;
+          swallow(e, !type.startsWith('touch'));
+        },
+        { capture: true, passive: false },
+      );
+    }
+
+    window.addEventListener(
       'click',
       (e) => {
-        const t = e.target as Element | null;
-        const clickable = t?.closest?.(CLICKABLE) as Element | null;
-        if (!clickable || !document.contains(clickable)) return;
-        if (bypass.has(clickable)) {
-          bypass.delete(clickable);
-          return; // 「今回だけ実行する」の再発火は通す
-        }
+        if (isPaused()) return;
+        const els = pathElements(e);
+        if (exempt(els)) return;
         if (lockMode) {
-          e.preventDefault();
-          e.stopImmediatePropagation();
-          e.stopPropagation();
-          lockElement(clickable);
+          const target = firstClickable(els);
+          if (!target) return;
+          swallow(e);
+          lockElement(target);
           return;
         }
-        if (lockedNodes.has(clickable) || matchesLocked(clickable)) {
-          e.preventDefault();
-          e.stopImmediatePropagation();
-          e.stopPropagation();
-          // セレクタが陳腐化して実ノードだけ残っている場合は自己修復
-          if (!matchesLocked(clickable)) {
-            const sel = buildSelector(clickable);
-            locked.add(sel);
-            void persistLocks();
-            applyLocks();
-          }
-          nudge(clickable);
-        }
+        const target = firstLocked(els);
+        if (!target) return;
+        swallow(e);
+        selectorFor(target); // 陳腐化していれば自己修復
+        nudge(target);
       },
       true,
     );
 
-    document.addEventListener(
+    // auxclick (中クリック等): ロックモードの狙い先とロック済みの要素を click と同様に止める
+    // (ロック済みリンクを中クリックで新しいタブに開けないようにする)
+    window.addEventListener(
+      'auxclick',
+      (e) => {
+        if (isPaused()) return;
+        const els = pathElements(e);
+        if (exempt(els)) return;
+        const target = lockMode ? firstClickable(els) : firstLocked(els);
+        if (target) swallow(e);
+      },
+      true,
+    );
+
+    // dragstart: ロック済みリンクのドラッグで新しいタブに開くのを防ぐ (ロックモード中も止める)
+    window.addEventListener(
+      'dragstart',
+      (e) => {
+        if (isPaused()) return;
+        const els = pathElements(e);
+        if (exempt(els)) return;
+        const target = lockMode ? firstClickable(els) : firstLocked(els);
+        if (target) swallow(e);
+      },
+      true,
+    );
+
+    window.addEventListener(
       'dblclick',
       (e) => {
-        const t = e.target as Element | null;
-        const clickable = t?.closest?.(CLICKABLE) as Element | null;
-        if (!clickable || !document.contains(clickable)) return;
+        if (isPaused()) return;
+        const els = pathElements(e);
+        if (exempt(els)) return;
         if (lockMode) {
-          e.preventDefault();
-          e.stopImmediatePropagation();
-          e.stopPropagation();
+          if (firstClickable(els)) swallow(e);
           return;
         }
-        let sel = findLockedSelector(clickable);
-        if (!sel && lockedNodes.has(clickable)) {
-          // 同一ノード再訪だがセレクタ不一致 → 自己修復して継続
-          sel = buildSelector(clickable);
-          locked.add(sel);
-          void persistLocks();
-          applyLocks();
-        }
-        if (sel) {
-          e.preventDefault();
-          e.stopImmediatePropagation();
-          e.stopPropagation();
-          console.debug('[btn-locker] open modal for', sel);
-          openConfirmModal(clickable, sel);
-        } else {
-          console.debug('[btn-locker] dblclick missed lock:', describe(clickable));
-        }
+        const target = firstLocked(els);
+        if (!target) return;
+        const sel = selectorFor(target);
+        if (!sel) return;
+        swallow(e);
+        console.debug('[btn-locker] open modal for', sel);
+        openConfirmModal(target, sel);
       },
       true,
     );
 
     // ---------- lock mode exit: 右クリック / Esc ----------
-    document.addEventListener(
+    window.addEventListener(
       'contextmenu',
       (e) => {
         if (!lockMode) return;
-        e.preventDefault();
-        e.stopImmediatePropagation();
-        e.stopPropagation();
-        setLockMode(false);
+        swallow(e);
+        exitByUser();
       },
       true,
     );
 
-    document.addEventListener(
+    window.addEventListener(
       'keydown',
       (e) => {
+        // 確認モーダル: Esc で閉じる / Tab はモーダル内に閉じ込める
+        if (modalHost && modalShadow) {
+          if (e.key === 'Escape') {
+            swallow(e);
+            closeModal();
+            return;
+          }
+          if (e.key === 'Tab') {
+            const items = [...modalShadow.querySelectorAll<HTMLElement>('button')];
+            if (items.length === 0) return;
+            const active = modalShadow.activeElement as HTMLElement | null;
+            const idx = active ? items.indexOf(active) : -1;
+            let next: number;
+            if (e.shiftKey) next = idx <= 0 ? items.length - 1 : idx - 1;
+            else next = idx < 0 || idx === items.length - 1 ? 0 : idx + 1;
+            swallow(e);
+            items[next]?.focus();
+          }
+          return;
+        }
         if (!lockMode || e.key !== 'Escape') return;
-        setLockMode(false);
+        exitByUser();
       },
       true,
     );
 
     // ---------- lock mode aim highlight ----------
-    document.addEventListener(
+    window.addEventListener(
       'mouseover',
       (e) => {
         if (!lockMode) return;
-        const t = e.target as Element | null;
-        const clickable = t?.closest?.(CLICKABLE) as Element | null;
+        const els = pathElements(e);
+        if (modalHost && els.includes(modalHost)) return;
+        const clickable = firstClickable(els);
         if (currentAim && currentAim !== clickable) currentAim.classList.remove(AIM_CLASS);
         currentAim = clickable;
-        if (clickable && document.contains(clickable)) clickable.classList.add(AIM_CLASS);
+        if (clickable) {
+          ensureStyle(clickable);
+          clickable.classList.add(AIM_CLASS);
+        }
       },
       true,
     );
 
-    // ---------- SPA support ----------
+    // ---------- SPA support: ロックがあるときだけ MutationObserver を動かす ----------
     let moTimer: number | undefined;
-    const observer = new MutationObserver(() => {
+    let observing = false;
+    let observedRoots = new WeakSet<Node>();
+    // 拡張機能自身が追加・削除したノード (toast / モーダル / style) だけの変化は無視する
+    const isOurs = (n: Node): boolean =>
+      n instanceof Element &&
+      (n.id === 'btn-locker-toast' ||
+        n.id === 'btn-locker-modal-host' ||
+        n.id === 'btn-locker-style' ||
+        n.hasAttribute('data-btn-locker'));
+    const observer = new MutationObserver((records) => {
+      const relevant = records.some((r) => {
+        const nodes = [...r.addedNodes, ...r.removedNodes];
+        return nodes.length === 0 || !nodes.every(isOurs);
+      });
+      if (!relevant) return;
       window.clearTimeout(moTimer);
       moTimer = window.setTimeout(applyLocks, 120);
     });
-    observer.observe(document.documentElement, { childList: true, subtree: true });
+    const OBS_OPTS: MutationObserverInit = { childList: true, subtree: true };
 
-    // ---------- storage sync (multi-tab) ----------
+    // MutationObserver は shadow 境界を越えないため、辿った open shadow root も個別に監視する
+    function observeRoot(root: ShadowRoot): void {
+      if (!observing || observedRoots.has(root)) return;
+      observedRoots.add(root);
+      observer.observe(root, OBS_OPTS);
+    }
+
+    function syncObserver(): void {
+      const need = !isPaused() && (mine.length > 0 || lockedNodes.size > 0);
+      if (need && !observing) {
+        observing = true;
+        observer.observe(document.documentElement, OBS_OPTS);
+      } else if (!need && observing) {
+        observing = false;
+        observer.disconnect();
+        observedRoots = new WeakSet<Node>();
+        window.clearTimeout(moTimer);
+      }
+    }
+
+    // ---------- storage sync (multi-tab / 全フレーム) ----------
     browser.storage.onChanged.addListener((changes, area) => {
-      if (area !== 'local' || !changes[STORE_KEY]) return;
-      void loadLocks().then(applyLocks);
+      if (area !== 'local') return;
+      if (changes[LOCKS_KEY] || changes[PAUSE_KEY] || changes[LOCKS_KEY_V1]) void loadAll();
     });
 
     // ---------- messages (popup / background) ----------
@@ -454,31 +730,29 @@ export default defineContentScript({
     // ロールアウトでしか動かないため使わない（それ以前はレスポンスが undefined になる）。
     // https://developer.chrome.com/docs/extensions/develop/concepts/messaging
     browser.runtime.onMessage.addListener((msg: unknown, _sender, sendResponse) => {
-      const m = msg as { type?: string; selector?: string };
-      if (m?.type === 'btn-locker:toggle') {
-        setLockMode(!lockMode);
+      const m = msg as { type?: string; on?: unknown; selector?: unknown; f?: unknown };
+      if (m?.type === 'btn-locker:state') {
+        sendResponse({ lockMode, origin: TOP_ORIGIN, paused: isPaused() });
+        return;
+      }
+      if (m?.type === 'btn-locker:set-lockmode' && typeof m.on === 'boolean') {
+        setLockMode(m.on);
         sendResponse({ lockMode });
         return;
       }
-      if (m?.type === 'btn-locker:state') {
-        sendResponse({ lockMode, selectors: [...locked], origin: ORIGIN });
-        return;
-      }
       if (m?.type === 'btn-locker:unlock' && typeof m.selector === 'string') {
-        unlockSelector(m.selector);
+        if (m.f === FRAME_ORIGIN) unlockedFromPopup(m.selector);
         sendResponse({ ok: true });
         return;
       }
-      if (m?.type === 'btn-locker:clear') {
-        locked.clear();
-        void persistLocks();
-        document.querySelectorAll(`.${LOCK_CLASS}`).forEach((el) => el.classList.remove(LOCK_CLASS));
+      if (m?.type === 'btn-locker:reload') {
+        void loadAll();
         sendResponse({ ok: true });
         return;
       }
     });
 
     // ---------- init ----------
-    void loadLocks().then(applyLocks);
+    void loadAll();
   },
 });
