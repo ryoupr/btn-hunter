@@ -1,4 +1,16 @@
-import { LIMITS, migrateV1, mutateLocks, type LockEntry } from '../utils/storage';
+import { isOriginString, LIMITS, migrateV1, mutateLocks, type LockEntry } from '../utils/storage';
+
+// 送信元フレームのオリジン。sender.origin（Chrome 80+）を優先し、無ければ sender.url から導く。
+// 不透明オリジン（sandbox iframe 等）は content 側の location.origin と同じく 'null' になる。
+function senderFrameOrigin(sender: { origin?: string; url?: string }): string | null {
+  if (typeof sender.origin === 'string') return sender.origin;
+  if (typeof sender.url !== 'string') return null;
+  try {
+    return new URL(sender.url).origin;
+  } catch {
+    return null;
+  }
+}
 
 export default defineBackground(() => {
   // v1 → v2 の保存形式移行 (冪等)。インストール/更新時と、サービスワーカー起動時の両方で試みる
@@ -41,8 +53,32 @@ export default defineBackground(() => {
     // content script からの書き込みはここに集約する (Web Locks は content script と
     // 拡張機能のオリジン間で共有されないため、background で直列化する)
     if (m?.type === 'btn-locker:mutate') {
-      if (typeof m.top !== 'string' || typeof m.f !== 'string') return;
-      const add: LockEntry[] = (Array.isArray(m.add) ? m.add : [])
+      // 送信元の検証: 自拡張の content script（タブ内のフレーム）からのみ受け付け、
+      // 送信元フレームのオリジン以外のエントリは書き換えさせない（confused deputy 対策）
+      const senderOrigin = senderFrameOrigin(sender);
+      if (
+        sender.id !== browser.runtime.id ||
+        sender.tab?.id == null ||
+        typeof sender.frameId !== 'number' ||
+        !isOriginString(m.top) ||
+        !isOriginString(m.f) ||
+        senderOrigin === null ||
+        m.f !== senderOrigin ||
+        // トップフレームは自分自身がトップ。サブフレームのトップは tabs 権限なしでは
+        // 導けないため形式検証のみ（f の突き合わせで書き込み先フレームは限定される）
+        (sender.frameId === 0 && m.top !== m.f)
+      ) {
+        sendResponse({ ok: false });
+        return;
+      }
+      const f = m.f;
+      const rawAdd = Array.isArray(m.add) ? m.add : [];
+      const rawRemove = Array.isArray(m.remove) ? m.remove : [];
+      if (rawAdd.length > LIMITS.maxPerOrigin || rawRemove.length > LIMITS.maxPerOrigin) {
+        sendResponse({ ok: false });
+        return;
+      }
+      const add: LockEntry[] = rawAdd
         .filter(
           (e): e is LockEntry =>
             typeof e === 'object' &&
@@ -50,14 +86,14 @@ export default defineBackground(() => {
             typeof (e as LockEntry).s === 'string' &&
             (e as LockEntry).s.length > 0 &&
             (e as LockEntry).s.length <= LIMITS.maxSelector &&
-            typeof (e as LockEntry).f === 'string' &&
+            (e as LockEntry).f === f &&
             typeof (e as LockEntry).n === 'string',
         )
-        .map((e) => ({ s: e.s, f: e.f, n: e.n.slice(0, LIMITS.maxName) }));
-      const remove = (Array.isArray(m.remove) ? m.remove : []).filter(
-        (x): x is string => typeof x === 'string',
+        .map((e) => ({ s: e.s, f, n: e.n.slice(0, LIMITS.maxName) }));
+      const remove = rawRemove.filter(
+        (x): x is string => typeof x === 'string' && x.length > 0 && x.length <= LIMITS.maxSelector,
       );
-      mutateLocks(m.top, m.f, { add, remove }).then(
+      mutateLocks(m.top, f, { add, remove }).then(
         () => sendResponse({ ok: true }),
         () => sendResponse({ ok: false }),
       );
