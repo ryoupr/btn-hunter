@@ -36,10 +36,15 @@ export async function installChromeStub({ tabState } = {}) {
   };
 }
 
-// popup / background からのメッセージ送信を模擬する
+// popup / background からのメッセージ送信を模擬する（sendResponse 方式・Promise 返却方式の両対応）
 export async function sendToContent(msg) {
   for (const fn of messageListeners) {
-    const res = await fn(msg, {}, () => {});
+    let responded;
+    const viaCallback = new Promise((resolve) => {
+      responded = resolve;
+    });
+    const ret = fn(msg, {}, (res) => responded(res));
+    const res = ret instanceof Promise ? await ret : await Promise.race([viaCallback, Promise.resolve(undefined)]);
     if (res !== undefined) return res;
   }
   return undefined;
