@@ -152,7 +152,9 @@ wxt.config.ts   # 拡張名・権限・ショートカット定義
 - ページ読み込み直後の数十 ms（ストレージ読み込み中）はロック未適用の瞬間があります（`document_start` 起動で最小化済み）
 - closed な Shadow DOM 内のボタンは、ページ側から辿れないため対象外です（open のみ対応）。Shadow DOM 内の `MutationObserver` は、ロック済みパスで辿れた open shadow root のみ監視します
 - iframe: `about:blank` / `srcdoc` / `data:` の iframe は対象外です（`matchAboutBlank` 未使用）。iframe 内でロックしたセレクタは、トップページと同一オリジンの iframe では、トップ側の同じセレクタにも一致する要素があれば同様にロックされます。ロックモードは、ONにした後に読み込まれた iframe には引き継がれません
-- 複数のタブ/フレームが同時にロックを書き込むと、後勝ちで上書きされる場合があります（まれ）
+- `about:blank` / `srcdoc` / `blob:` の iframe は対象外です
+- Chrome 専用です（トップページのオリジンの特定に `location.ancestorOrigins` を使うため。Firefox 等では iframe 内の保存キーがずれる場合があります）
+- ストレージへの書き込みは background に集約し、Web Locks で直列化しています（複数タブ/フレームの同時ロックでも取りこぼしません）
 - `chrome://` 配下や Chrome ウェブストアのページでは動作しません（Chrome の仕様）
 
 ## ライセンス

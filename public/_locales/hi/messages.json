@@ -46,5 +46,6 @@
   "importTooLarge": { "message": "फ़ाइल बहुत बड़ी है।", "description": "Options: file too large" },
   "importParseError": { "message": "फ़ाइल मान्य JSON नहीं है।", "description": "Options: JSON parse error" },
   "importInvalid": { "message": "अमान्य फ़ाइल: $1", "description": "Options: schema validation error", "placeholders": { "detail": { "content": "$1", "example": "locks[https://example.com][0].s" } } },
-  "importDone": { "message": "आयात हो गया। अब $1 लॉक सहेजे हुए हैं।", "description": "Options: import result", "placeholders": { "count": { "content": "$1", "example": "12" } } }
+  "importDone": { "message": "आयात हो गया। अब $1 लॉक सहेजे हुए हैं।", "description": "Options: import result", "placeholders": { "count": { "content": "$1", "example": "12" } } },
+  "lockLimit": { "message": "लॉक की सीमा पूरी हो गई ($1 प्रति साइट)। और जोड़ने से पहले कुछ लॉक हटाएं।", "description": "Toast when the per-site lock limit is reached", "placeholders": { "max": { "content": "$1", "example": "500" } } }
 }

@@ -1,4 +1,4 @@
-import { migrateV1 } from '../utils/storage';
+import { LIMITS, migrateV1, mutateLocks, type LockEntry } from '../utils/storage';
 
 export default defineBackground(() => {
   // v1 → v2 の保存形式移行 (冪等)。インストール/更新時と、サービスワーカー起動時の両方で試みる
@@ -30,8 +30,39 @@ export default defineBackground(() => {
 
   // iframe 内で Esc / 右クリックによりロックモードが終了したとき、同じタブの全フレームを OFF にそろえる。
   // 応答は返さない (sendResponse 方式のメッセージング。Promise は返さない)。
-  browser.runtime.onMessage.addListener((msg: unknown, sender) => {
-    const m = msg as { type?: string };
+  browser.runtime.onMessage.addListener((msg: unknown, sender, sendResponse) => {
+    const m = msg as {
+      type?: string;
+      top?: unknown;
+      f?: unknown;
+      add?: unknown;
+      remove?: unknown;
+    };
+    // content script からの書き込みはここに集約する (Web Locks は content script と
+    // 拡張機能のオリジン間で共有されないため、background で直列化する)
+    if (m?.type === 'btn-locker:mutate') {
+      if (typeof m.top !== 'string' || typeof m.f !== 'string') return;
+      const add: LockEntry[] = (Array.isArray(m.add) ? m.add : [])
+        .filter(
+          (e): e is LockEntry =>
+            typeof e === 'object' &&
+            e !== null &&
+            typeof (e as LockEntry).s === 'string' &&
+            (e as LockEntry).s.length > 0 &&
+            (e as LockEntry).s.length <= LIMITS.maxSelector &&
+            typeof (e as LockEntry).f === 'string' &&
+            typeof (e as LockEntry).n === 'string',
+        )
+        .map((e) => ({ s: e.s, f: e.f, n: e.n.slice(0, LIMITS.maxName) }));
+      const remove = (Array.isArray(m.remove) ? m.remove : []).filter(
+        (x): x is string => typeof x === 'string',
+      );
+      mutateLocks(m.top, m.f, { add, remove }).then(
+        () => sendResponse({ ok: true }),
+        () => sendResponse({ ok: false }),
+      );
+      return true; // 非同期で sendResponse するため (Promise は返さない)
+    }
     if (m?.type !== 'btn-locker:mode-exit') return;
     const tabId = sender.tab?.id;
     if (tabId == null) return;

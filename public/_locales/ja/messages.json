@@ -46,5 +46,6 @@
   "importTooLarge": { "message": "ファイルが大きすぎます。", "description": "Options: file too large" },
   "importParseError": { "message": "有効な JSON ファイルではありません。", "description": "Options: JSON parse error" },
   "importInvalid": { "message": "不正なファイルです: $1", "description": "Options: schema validation error", "placeholders": { "detail": { "content": "$1", "example": "locks[https://example.com][0].s" } } },
-  "importDone": { "message": "インポートしました。現在 $1 件のロックが保存されています。", "description": "Options: import result", "placeholders": { "count": { "content": "$1", "example": "12" } } }
+  "importDone": { "message": "インポートしました。現在 $1 件のロックが保存されています。", "description": "Options: import result", "placeholders": { "count": { "content": "$1", "example": "12" } } },
+  "lockLimit": { "message": "ロックの上限（1 サイト $1 件）に達しました。追加するには、いくつか解除してください。", "description": "Toast when the per-site lock limit is reached", "placeholders": { "max": { "content": "$1", "example": "500" } } }
 }

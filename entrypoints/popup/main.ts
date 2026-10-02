@@ -153,7 +153,8 @@ async function render() {
       unlockBtn.textContent = t('unlock');
       unlockBtn.addEventListener('click', async () => {
         await mutateLocks(topOrigin, entry.f, { remove: [entry.s] });
-        await sendToTab(tabId, { type: 'btn-locker:reload' });
+        // 全フレームへ: 該当フレームが、同じ要素に一致する他のエントリもまとめて外す
+        await sendToTab(tabId, { type: 'btn-locker:unlock', selector: entry.s, f: entry.f });
         await render();
       });
       ul.appendChild(li);

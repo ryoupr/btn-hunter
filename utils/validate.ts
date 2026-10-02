@@ -8,6 +8,7 @@ import {
   type LockEntry,
   type PauseState,
 } from './storage';
+import { isHeavySelector } from './selector';
 
 export class ImportError extends Error {
   constructor(public detail: string) {
@@ -53,6 +54,7 @@ export function validateImport(raw: unknown): { locks: LockDB; pause: PauseState
       if (typeof e.s !== 'string' || e.s.length === 0 || e.s.length > LIMITS.maxSelector) {
         throw new ImportError(`${where}.s`);
       }
+      if (isHeavySelector(e.s)) throw new ImportError(`${where}.s: selector too complex`);
       if (!isOriginString(e.f)) throw new ImportError(`${where}.f`);
       if (typeof e.n !== 'string' || e.n.length > LIMITS.maxName) throw new ImportError(`${where}.n`);
       out.push({ s: e.s, f: e.f, n: e.n });

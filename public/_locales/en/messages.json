@@ -46,5 +46,6 @@
   "importTooLarge": { "message": "The file is too large.", "description": "Options: file too large" },
   "importParseError": { "message": "The file is not valid JSON.", "description": "Options: JSON parse error" },
   "importInvalid": { "message": "Invalid file: $1", "description": "Options: schema validation error", "placeholders": { "detail": { "content": "$1", "example": "locks[https://example.com][0].s" } } },
-  "importDone": { "message": "Imported. Now $1 locks are saved.", "description": "Options: import result", "placeholders": { "count": { "content": "$1", "example": "12" } } }
+  "importDone": { "message": "Imported. Now $1 locks are saved.", "description": "Options: import result", "placeholders": { "count": { "content": "$1", "example": "12" } } },
+  "lockLimit": { "message": "Lock limit reached ($1 per site). Unlock some before adding more.", "description": "Toast when the per-site lock limit is reached", "placeholders": { "max": { "content": "$1", "example": "500" } } }
 }

@@ -46,5 +46,6 @@
   "importTooLarge": { "message": "الملف كبير جدًا.", "description": "Options: file too large" },
   "importParseError": { "message": "الملف ليس JSON صالحًا.", "description": "Options: JSON parse error" },
   "importInvalid": { "message": "ملف غير صالح: $1", "description": "Options: schema validation error", "placeholders": { "detail": { "content": "$1", "example": "locks[https://example.com][0].s" } } },
-  "importDone": { "message": "تم الاستيراد. عدد الأقفال المحفوظة الآن: $1.", "description": "Options: import result", "placeholders": { "count": { "content": "$1", "example": "12" } } }
+  "importDone": { "message": "تم الاستيراد. عدد الأقفال المحفوظة الآن: $1.", "description": "Options: import result", "placeholders": { "count": { "content": "$1", "example": "12" } } },
+  "lockLimit": { "message": "تم بلوغ حد الأقفال ($1 لكل موقع). أزل بعضها قبل إضافة المزيد.", "description": "Toast when the per-site lock limit is reached", "placeholders": { "max": { "content": "$1", "example": "500" } } }
 }

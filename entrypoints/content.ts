@@ -13,7 +13,6 @@ import {
   PAUSE_KEY,
   LIMITS,
   isPausedFor,
-  mutateLocks,
   readLocks,
   readPause,
   type LockEntry,
@@ -66,6 +65,9 @@ export default defineContentScript({
     let lockMode = false;
     // このフレームに適用するエントリ (f === FRAME_ORIGIN)
     let mine: LockEntry[] = [];
+    // 同じトップオリジンの他フレームのエントリ数 (上限判定は storage 側と同じトップオリジン単位)
+    let othersTotal = 0;
+    const topTotal = (): number => othersTotal + mine.length;
     let pause: PauseState = { global: false, sites: [] };
     // ロック時点の実ノード → そのノードを指していたセレクタ群。
     // SPA再描画等でセレクタが陳腐化しても取り逃がさず、自己修復時に古いセレクタを整理する
@@ -150,10 +152,13 @@ export default defineContentScript({
     async function loadAll(): Promise<void> {
       try {
         const [db, p] = await Promise.all([readLocks(), readPause()]);
-        mine = (db[TOP_ORIGIN] ?? []).filter((e) => e.f === FRAME_ORIGIN);
+        const all = db[TOP_ORIGIN] ?? [];
+        mine = all.filter((e) => e.f === FRAME_ORIGIN);
+        othersTotal = all.length - mine.length;
         pause = p;
       } catch {
         mine = [];
+        othersTotal = 0;
         pause = { global: false, sites: [] };
       }
       // 解除済み(エントリが無くなった)ノードの保持を捨てる
@@ -167,10 +172,15 @@ export default defineContentScript({
       syncObserver();
     }
 
+    // 書き込みは background に集約 (Web Locks は content script と拡張機能のオリジン間で共有されない)
     function persist(op: { add?: LockEntry[]; remove?: string[] }): void {
-      void mutateLocks(TOP_ORIGIN, FRAME_ORIGIN, op).catch(() => {
-        /* storage 利用不可でも動作は継続 */
-      });
+      try {
+        void browser.runtime
+          .sendMessage({ type: 'btn-locker:mutate', top: TOP_ORIGIN, f: FRAME_ORIGIN, ...op })
+          .catch(() => undefined);
+      } catch {
+        /* 拡張が再読み込みされた直後など。動作は継続 */
+      }
     }
 
     // ---------- naming ----------
@@ -272,7 +282,14 @@ export default defineContentScript({
       const sel = buildPath(el);
       const name = accessibleName(el).slice(0, LIMITS.maxName) || `<${el.tagName.toLowerCase()}>`;
       const entry: LockEntry = { s: sel, f: FRAME_ORIGIN, n: name };
-      if (!mine.some((e) => e.s === sel) && mine.length < LIMITS.maxPerOrigin) mine.push(entry);
+      if (!mine.some((e) => e.s === sel)) {
+        if (topTotal() >= LIMITS.maxPerOrigin) {
+          // 上限: 保存せず、lockedNodes にも入れない
+          toast(t('lockLimit', String(LIMITS.maxPerOrigin)));
+          return;
+        }
+        mine.push(entry);
+      }
       trackNode(el, sel);
       persist({ add: [entry] });
       applyLocks();
@@ -294,9 +311,18 @@ export default defineContentScript({
         n: accessibleName(el).slice(0, LIMITS.maxName) || `<${el.tagName.toLowerCase()}>`,
       };
       mine = mine.filter((e) => !stale.includes(e.s));
-      if (!mine.some((e) => e.s === sel)) mine.push(entry);
+      let add: LockEntry[] = [];
+      if (!mine.some((e) => e.s === sel)) {
+        if (topTotal() >= LIMITS.maxPerOrigin) {
+          if (stale.length) persist({ remove: stale });
+          applyLocks();
+          return sel; // 上限: 追加しない (ノードは追跡しない)
+        }
+        mine.push(entry);
+        add = [entry];
+      }
       trackNode(el, sel);
-      persist({ add: [entry], remove: stale });
+      persist({ add, remove: stale });
       applyLocks();
       syncObserver();
       return sel;
@@ -311,6 +337,30 @@ export default defineContentScript({
       persist({ remove: [sel] });
       applyLocks();
       syncObserver();
+    }
+
+    // 「解除」: その要素に一致するエントリをすべて外す (同じ要素を指す別セレクタが残らないように)
+    function unlockElement(el: Element, sel: string): void {
+      const sels = new Set<string>([sel, ...(lockedNodes.get(el) ?? [])]);
+      for (const e of mine) if (matchesPath(el, e.s)) sels.add(e.s);
+      lockedNodes.delete(el);
+      mine = mine.filter((e) => !sels.has(e.s));
+      for (const [node, set] of lockedNodes) {
+        for (const x of sels) set.delete(x);
+        if (set.size === 0) lockedNodes.delete(node);
+      }
+      persist({ remove: [...sels] });
+      applyLocks();
+      syncObserver();
+    }
+
+    // ポップアップで selector のエントリが消された後の後始末: そのセレクタが指していた要素に
+    // 別のエントリが一致して、まだロックされているならそれも外す
+    function unlockedFromPopup(sel: string): void {
+      const els = new Set<Element>(queryPath(sel));
+      for (const [node, set] of lockedNodes) if (set.has(sel)) els.add(node);
+      for (const el of els) unlockElement(el, sel);
+      unlockSelector(sel);
     }
 
     // ロック済みなら、その要素に対応するセレクタを返す (実ノードのみ残っている場合は自己修復)
@@ -432,7 +482,7 @@ export default defineContentScript({
 
       shadow.querySelector('[data-act="cancel"]')?.addEventListener('click', closeModal);
       shadow.querySelector('[data-act="unlock"]')?.addEventListener('click', () => {
-        unlockSelector(sel);
+        unlockElement(el, sel);
         closeModal();
         toast(t('unlocked'));
       });
@@ -521,6 +571,33 @@ export default defineContentScript({
       true,
     );
 
+    // auxclick (中クリック等): ロックモードの狙い先とロック済みの要素を click と同様に止める
+    // (ロック済みリンクを中クリックで新しいタブに開けないようにする)
+    window.addEventListener(
+      'auxclick',
+      (e) => {
+        if (isPaused()) return;
+        const els = pathElements(e);
+        if (exempt(els)) return;
+        const target = lockMode ? firstClickable(els) : firstLocked(els);
+        if (target) swallow(e);
+      },
+      true,
+    );
+
+    // dragstart: ロック済みリンクのドラッグで新しいタブに開くのを防ぐ (ロックモード中も止める)
+    window.addEventListener(
+      'dragstart',
+      (e) => {
+        if (isPaused()) return;
+        const els = pathElements(e);
+        if (exempt(els)) return;
+        const target = lockMode ? firstClickable(els) : firstLocked(els);
+        if (target) swallow(e);
+      },
+      true,
+    );
+
     window.addEventListener(
       'dblclick',
       (e) => {
@@ -604,7 +681,19 @@ export default defineContentScript({
     let moTimer: number | undefined;
     let observing = false;
     let observedRoots = new WeakSet<Node>();
-    const observer = new MutationObserver(() => {
+    // 拡張機能自身が追加・削除したノード (toast / モーダル / style) だけの変化は無視する
+    const isOurs = (n: Node): boolean =>
+      n instanceof Element &&
+      (n.id === 'btn-locker-toast' ||
+        n.id === 'btn-locker-modal-host' ||
+        n.id === 'btn-locker-style' ||
+        n.hasAttribute('data-btn-locker'));
+    const observer = new MutationObserver((records) => {
+      const relevant = records.some((r) => {
+        const nodes = [...r.addedNodes, ...r.removedNodes];
+        return nodes.length === 0 || !nodes.every(isOurs);
+      });
+      if (!relevant) return;
       window.clearTimeout(moTimer);
       moTimer = window.setTimeout(applyLocks, 120);
     });
@@ -641,7 +730,7 @@ export default defineContentScript({
     // ロールアウトでしか動かないため使わない（それ以前はレスポンスが undefined になる）。
     // https://developer.chrome.com/docs/extensions/develop/concepts/messaging
     browser.runtime.onMessage.addListener((msg: unknown, _sender, sendResponse) => {
-      const m = msg as { type?: string; on?: unknown };
+      const m = msg as { type?: string; on?: unknown; selector?: unknown; f?: unknown };
       if (m?.type === 'btn-locker:state') {
         sendResponse({ lockMode, origin: TOP_ORIGIN, paused: isPaused() });
         return;
@@ -649,6 +738,11 @@ export default defineContentScript({
       if (m?.type === 'btn-locker:set-lockmode' && typeof m.on === 'boolean') {
         setLockMode(m.on);
         sendResponse({ lockMode });
+        return;
+      }
+      if (m?.type === 'btn-locker:unlock' && typeof m.selector === 'string') {
+        if (m.f === FRAME_ORIGIN) unlockedFromPopup(m.selector);
+        sendResponse({ ok: true });
         return;
       }
       if (m?.type === 'btn-locker:reload') {

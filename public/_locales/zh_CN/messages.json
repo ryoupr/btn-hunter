@@ -46,5 +46,6 @@
   "importTooLarge": { "message": "文件太大。", "description": "Options: file too large" },
   "importParseError": { "message": "该文件不是有效的 JSON。", "description": "Options: JSON parse error" },
   "importInvalid": { "message": "无效的文件：$1", "description": "Options: schema validation error", "placeholders": { "detail": { "content": "$1", "example": "locks[https://example.com][0].s" } } },
-  "importDone": { "message": "导入完成。当前已保存 $1 个锁定。", "description": "Options: import result", "placeholders": { "count": { "content": "$1", "example": "12" } } }
+  "importDone": { "message": "导入完成。当前已保存 $1 个锁定。", "description": "Options: import result", "placeholders": { "count": { "content": "$1", "example": "12" } } },
+  "lockLimit": { "message": "已达到锁定上限（每个网站 $1 个）。请先解除一些再添加。", "description": "Toast when the per-site lock limit is reached", "placeholders": { "max": { "content": "$1", "example": "500" } } }
 }

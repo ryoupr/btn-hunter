@@ -46,5 +46,6 @@
   "importTooLarge": { "message": "El archivo es demasiado grande.", "description": "Options: file too large" },
   "importParseError": { "message": "El archivo no es un JSON válido.", "description": "Options: JSON parse error" },
   "importInvalid": { "message": "Archivo no válido: $1", "description": "Options: schema validation error", "placeholders": { "detail": { "content": "$1", "example": "locks[https://example.com][0].s" } } },
-  "importDone": { "message": "Importado. Ahora hay $1 bloqueos guardados.", "description": "Options: import result", "placeholders": { "count": { "content": "$1", "example": "12" } } }
+  "importDone": { "message": "Importado. Ahora hay $1 bloqueos guardados.", "description": "Options: import result", "placeholders": { "count": { "content": "$1", "example": "12" } } },
+  "lockLimit": { "message": "Se alcanzó el límite de bloqueos ($1 por sitio). Quita algunos antes de añadir más.", "description": "Toast when the per-site lock limit is reached", "placeholders": { "max": { "content": "$1", "example": "500" } } }
 }

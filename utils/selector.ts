@@ -180,3 +180,39 @@ export function buildPath(el: Element): string {
   }
   return buildLocal(el, el.ownerDocument);
 }
+
+// ---------- 重いセレクタの判定 (インポート検証用) ----------
+export const MAX_SHADOW_SEGMENTS = 5;
+export const MAX_FUNCTIONAL_DEPTH = 2;
+
+/** :has( / :is( / :where( / :not( の入れ子が深すぎる、または ">>>" の段数が多すぎるセレクタか */
+export function isHeavySelector(sel: string): boolean {
+  if (splitPath(sel).length > MAX_SHADOW_SEGMENTS) return true;
+  const stack: boolean[] = []; // true = 対象の関数的擬似クラスの括弧
+  let depth = 0;
+  let quote: string | null = null;
+  for (let i = 0; i < sel.length; i++) {
+    const c = sel[i];
+    if (c === '\\') {
+      i++;
+      continue;
+    }
+    if (quote) {
+      if (c === quote) quote = null;
+      continue;
+    }
+    if (c === '"' || c === "'") {
+      quote = c;
+    } else if (c === '(') {
+      const m = /:(has|is|where|not)$/i.exec(sel.slice(Math.max(0, i - 6), i));
+      stack.push(!!m);
+      if (m) {
+        depth++;
+        if (depth > MAX_FUNCTIONAL_DEPTH) return true;
+      }
+    } else if (c === ')') {
+      if (stack.pop()) depth--;
+    }
+  }
+  return false;
+}

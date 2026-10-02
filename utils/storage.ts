@@ -91,12 +91,34 @@ function mergeInto(base: LockDB, add: LockDB): void {
   }
 }
 
-// ストレージ書き込みはこのコンテキスト内で直列化する (read-modify-write の競合を減らす)
+// 読み取り・更新・書き込みは Web Locks で直列化する。ロックは「オリジン単位」で共有されるため、
+// 拡張機能のオリジンで動く popup / options / service worker の間では共有される。
+// content script はページのオリジンで動くので共有されない (実測済み) → content からの書き込みは
+// runtime.sendMessage で background に集約し、background 側 (拡張機能のオリジン) で実行する。
+const LOCK_NAME = 'btn-locker:storage';
 let chain: Promise<unknown> = Promise.resolve();
 function enqueue<T>(fn: () => Promise<T>): Promise<T> {
+  if (typeof navigator !== 'undefined' && navigator.locks?.request) {
+    return navigator.locks.request(LOCK_NAME, () => fn()) as Promise<T>;
+  }
+  // Web Locks が無い環境のフォールバック: コンテキスト内のみ直列化
   const run = chain.then(fn, fn);
   chain = run.catch(() => undefined);
   return run;
+}
+
+/** 書き込み用の読み取り: v1 が残っていれば v2 へ統合する (削除は呼び出し側の set と同時に行う) */
+async function readForWrite(): Promise<{ db: LockDB; hadV1: boolean }> {
+  const got = await browser.storage.local.get([LOCKS_KEY, LOCKS_KEY_V1]);
+  const db = got[LOCKS_KEY] !== undefined ? sanitizeDB(got[LOCKS_KEY]) : {};
+  const hadV1 = got[LOCKS_KEY_V1] !== undefined;
+  if (hadV1) mergeInto(db, convertV1(got[LOCKS_KEY_V1]));
+  return { db, hadV1 };
+}
+
+async function writeLocks(db: LockDB, hadV1: boolean): Promise<void> {
+  await browser.storage.local.set({ [LOCKS_KEY]: db });
+  if (hadV1) await browser.storage.local.remove(LOCKS_KEY_V1);
 }
 
 /** v2 を読む。v2 が無く v1 だけある場合は v1 を (メモリ上で) 変換して返す。書き込みはしない */
@@ -110,12 +132,9 @@ export async function readLocks(): Promise<LockDB> {
 /** v1 → v2 の移行 (冪等)。v1 が無ければ何もしない。v2 が既にあれば重複を除いてマージする */
 export function migrateV1(): Promise<void> {
   return enqueue(async () => {
-    const got = await browser.storage.local.get([LOCKS_KEY, LOCKS_KEY_V1]);
-    if (got[LOCKS_KEY_V1] === undefined) return;
-    const merged = got[LOCKS_KEY] !== undefined ? sanitizeDB(got[LOCKS_KEY]) : {};
-    mergeInto(merged, convertV1(got[LOCKS_KEY_V1]));
-    await browser.storage.local.set({ [LOCKS_KEY]: merged });
-    await browser.storage.local.remove(LOCKS_KEY_V1);
+    const { db, hadV1 } = await readForWrite();
+    if (!hadV1) return;
+    await writeLocks(db, true);
   });
 }
 
@@ -125,7 +144,7 @@ export function mutateLocks(
   op: { add?: LockEntry[]; remove?: string[] },
 ): Promise<void> {
   return enqueue(async () => {
-    const db = await readLocks();
+    const { db, hadV1 } = await readForWrite();
     let list = db[top] ?? [];
     if (op.remove?.length) {
       const rm = new Set(op.remove);
@@ -137,16 +156,16 @@ export function mutateLocks(
     }
     if (list.length) db[top] = list;
     else delete db[top];
-    await browser.storage.local.set({ [LOCKS_KEY]: db });
+    await writeLocks(db, hadV1);
   });
 }
 
 /** 指定トップオリジンの全ロック (全フレーム分) を削除 */
 export function clearLocks(top: string): Promise<void> {
   return enqueue(async () => {
-    const db = await readLocks();
+    const { db, hadV1 } = await readForWrite();
     delete db[top];
-    await browser.storage.local.set({ [LOCKS_KEY]: db });
+    await writeLocks(db, hadV1);
   });
 }
 
@@ -200,7 +219,7 @@ export function applyImport(
       locks = data.locks;
       pause = { global: data.pause.global, sites: [...data.pause.sites] };
     } else {
-      locks = await readLocks();
+      locks = (await readForWrite()).db;
       mergeInto(locks, data.locks);
       const cur = await readPause();
       pause = {

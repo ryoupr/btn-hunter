@@ -46,5 +46,6 @@
   "importTooLarge": { "message": "Файл слишком большой.", "description": "Options: file too large" },
   "importParseError": { "message": "Файл не является корректным JSON.", "description": "Options: JSON parse error" },
   "importInvalid": { "message": "Недопустимый файл: $1", "description": "Options: schema validation error", "placeholders": { "detail": { "content": "$1", "example": "locks[https://example.com][0].s" } } },
-  "importDone": { "message": "Импортировано. Сейчас сохранено блокировок: $1.", "description": "Options: import result", "placeholders": { "count": { "content": "$1", "example": "12" } } }
+  "importDone": { "message": "Импортировано. Сейчас сохранено блокировок: $1.", "description": "Options: import result", "placeholders": { "count": { "content": "$1", "example": "12" } } },
+  "lockLimit": { "message": "Достигнут лимит блокировок ($1 на сайт). Снимите часть блокировок, чтобы добавить новые.", "description": "Toast when the per-site lock limit is reached", "placeholders": { "max": { "content": "$1", "example": "500" } } }
 }
