@@ -2,7 +2,7 @@
   "name": "btn-locker",
   "description": "うっかり押し・事故タップを防ぐボタン誤爆防止セーフティChrome拡張機能",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.2.1",
   "type": "module",
   "scripts": {
     "dev": "wxt",
