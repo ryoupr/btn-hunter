@@ -84,6 +84,15 @@ npm run build
 
 技術スタック: [WXT](https://wxt.dev)（vanilla-ts テンプレート）/ TypeScript / Manifest V3
 
+### ブランチ運用
+
+- `feature/*` → `develop`: PR で結合・ビルド検証（`ci.yml` のみ、リリースなし）
+- `develop` → `main`: リリースPR（version bump はここでのみ行う）
+- `main` push: `release.yml` がビルド→GitHub Release→ストア提出を行う
+- `develop` → `main` のPRはストア審査中（`PENDING_REVIEW`）はマージ不可（`store-review-guard` がブロック）
+
+詳細は [CONTRIBUTING.md](CONTRIBUTING.md) を参照してください。
+
 ## プロジェクト構成
 
 ```
@@ -119,6 +128,8 @@ wxt.config.ts   # 拡張名・権限・ショートカット定義
 1. `npm run zip` で提出用 ZIP（`.output/*.zip`）を生成
 2. [Developer Dashboard](https://chrome.google.com/webstore/devconsole) で「新しいアイテム」→ ZIP をアップロード（初回は $5 の登録料が必要）
 3. ストア掲載情報・プライバシー（単一用途・権限の理由・リモートコード・データ使用）を入力 → 送信（審査は通常 1〜3 営業日）
+
+上記は初回公開の手順です。公開後のアップデートは、`develop` → `main` のリリースPRで `package.json` の `version` を上げてマージすると、`release.yml` が GitHub Release の作成と Chrome Web Store への提出を自動で行います（要 Secrets。[CONTRIBUTING.md](CONTRIBUTING.md) 参照）。
 
 ### リスティング文案（ドラフト）
 
