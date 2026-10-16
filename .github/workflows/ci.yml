@@ -1,0 +1,89 @@
+name: ci
+
+# ブランチ運用: feature/* → develop → main
+# - feature → develop のPR / develop push: ビルド検証のみ（リリースしない）
+# - develop → main のPR: ビルド検証 + ストア審査中ガード
+# - main push: release.yml がリリース（ビルド→GitHub Release→ストア提出）を行う
+on:
+  pull_request:
+    branches: [develop, main]
+  push:
+    branches: [develop]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run compile
+
+      - run: npm run zip
+
+  store-review-guard:
+    # develop → main のPRが Chrome Web Store 審査中の場合はマージをブロックする。
+    # main へのPR時のみ実行し、審査中（PENDING_REVIEW）なら exit 1 で落とす。
+    # main のブランチ保護で本ジョブを required check に指定することが前提。
+    # Secrets 未設定時は判定不可のため警告のみで通過させる（fail-open）。
+    if: github.base_ref == 'main'
+    runs-on: ubuntu-latest
+    env:
+      CWS_SERVICE_ACCOUNT_JSON: ${{ secrets.CWS_SERVICE_ACCOUNT_JSON }}
+    steps:
+      - name: Check Chrome Web Store review status
+        env:
+          SA_JSON: ${{ secrets.CWS_SERVICE_ACCOUNT_JSON }}
+          PUBLISHER_ID: ${{ secrets.CHROME_PUBLISHER_ID }}
+          EXTENSION_ID: ${{ secrets.CHROME_EXTENSION_ID }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SA_JSON:-}" ] || [ -z "${PUBLISHER_ID:-}" ] || [ -z "${EXTENSION_ID:-}" ]; then
+            echo 'Store credentials are not configured, skipping review guard (fail-open)'
+            exit 0
+          fi
+
+          WORKDIR="$(mktemp -d)"
+          trap 'rm -rf "$WORKDIR"' EXIT
+          chmod 700 "$WORKDIR"
+
+          CLIENT_EMAIL="$(printf '%s' "$SA_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["client_email"])')"
+          printf '%s' "$SA_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["private_key"])' > "$WORKDIR/key.pem"
+          chmod 600 "$WORKDIR/key.pem"
+
+          b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+          HEADER='{"alg":"RS256","typ":"JWT"}'
+          NOW="$(date +%s)"
+          EXP="$((NOW + 3600))"
+          CLAIMS="$(printf '{"iss":"%s","scope":"https://www.googleapis.com/auth/chromewebstore","aud":"https://oauth2.googleapis.com/token","iat":%s,"exp":%s}' "$CLIENT_EMAIL" "$NOW" "$EXP")"
+          SEG1="$(printf '%s' "$HEADER" | b64url)"
+          SEG2="$(printf '%s' "$CLAIMS" | b64url)"
+          SIG="$(printf '%s' "$SEG1.$SEG2" | openssl dgst -sha256 -sign "$WORKDIR/key.pem" -binary | b64url)"
+          ASSERTION="$SEG1.$SEG2.$SIG"
+          TOKEN="$(curl -sS -X POST 'https://oauth2.googleapis.com/token' \
+            --data-urlencode 'grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer' \
+            --data-urlencode "assertion=$ASSERTION" \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin).get("access_token",""))')"
+          if [ -z "$TOKEN" ]; then
+            echo 'Failed to obtain access token, skipping review guard (fail-open)' >&2
+            exit 0
+          fi
+
+          STATUS_RESP="$(curl -sS -X GET \
+            "https://chromewebstore.googleapis.com/v2/publishers/${PUBLISHER_ID}/items/${EXTENSION_ID}:fetchStatus" \
+            -H "Authorization: Bearer $TOKEN" || echo '{}')"
+          SUBMITTED_STATE="$(printf '%s' "$STATUS_RESP" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("submittedItemRevisionStatus",{}).get("state",""))' 2>/dev/null || echo '')"
+          if [ "$SUBMITTED_STATE" = 'PENDING_REVIEW' ]; then
+            echo 'Chrome Web Store review is PENDING_REVIEW: blocking merge to main' >&2
+            exit 1
+          fi
+          echo "Submitted state: ${SUBMITTED_STATE:-unknown} (merge allowed)"

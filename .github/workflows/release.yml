@@ -1,0 +1,145 @@
+name: release
+
+# ブランチ運用: feature/* → develop → main
+# main への push を起点に、package.json の version に対応するタグが
+# 未存在のときだけビルド→GitHub Release 作成→ストア提出申請を行う。
+# すなわち develop → main のマージ時だけリリースされる。
+# feature → develop のPR/ develop push では ci.yml がビルド検証のみ行う。
+# Chrome Web Store への提出はサービスアカウント方式（API v2）で行う。
+# 必要な Secrets（CWS_SERVICE_ACCOUNT_JSON / CHROME_PUBLISHER_ID）が
+# 未設定の間はスキップされる。API v1 系の Secrets（CHROME_CLIENT_* /
+# CHROME_REFRESH_TOKEN）は v1 廃止（2026-10-15）までの移行期間用で、
+# 本ワークフローでは使用しない。
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'package.json'
+      - 'wxt.config.ts'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    # Secrets は if: で直接参照できないため job 環境変数経由で参照する。
+    # 未設定の Secret は空文字になることを利用して submit の要否を判定する。
+    env:
+      CWS_SERVICE_ACCOUNT_JSON: ${{ secrets.CWS_SERVICE_ACCOUNT_JSON }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # タグ参照のため全履歴取得
+          fetch-tags: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+
+      - id: version
+        run: echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - id: check
+        run: |
+          if git rev-parse "v${{ steps.version.outputs.version }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build store package
+        if: steps.check.outputs.exists == 'false'
+        run: npm run zip
+
+      - name: Create GitHub Release
+        if: steps.check.outputs.exists == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          generate_release_notes: true
+          files: .output/*.zip
+
+      - name: Submit to Chrome Web Store (API v2)
+        if: steps.check.outputs.exists == 'false' && env.CWS_SERVICE_ACCOUNT_JSON != ''
+        env:
+          SA_JSON: ${{ secrets.CWS_SERVICE_ACCOUNT_JSON }}
+          PUBLISHER_ID: ${{ secrets.CHROME_PUBLISHER_ID }}
+          EXTENSION_ID: ${{ secrets.CHROME_EXTENSION_ID }}
+        run: |
+          set -euo pipefail
+          # ZIP が1件に定まることを確認（ワイルドカードの取り違え防止）
+          mapfile -t ZIPS < <(ls .output/*-chrome.zip)
+          if [ "${#ZIPS[@]}" -ne 1 ]; then
+            echo "Expected exactly one chrome zip, found: ${ZIPS[*]:-none}" >&2
+            exit 1
+          fi
+          ZIP="${ZIPS[0]}"
+          echo "Submitting: $ZIP"
+
+          WORKDIR="$(mktemp -d)"
+          trap 'rm -rf "$WORKDIR"' EXIT
+          chmod 700 "$WORKDIR"
+
+          # サービスアカウントJSONから client_email / private_key を取り出す。
+          # 秘密値はログに出さない（GitHub が Secrets を自動マスクするが自衛も兼ねる）。
+          CLIENT_EMAIL="$(printf '%s' "$SA_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["client_email"])')"
+          printf '%s' "$SA_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["private_key"])' > "$WORKDIR/key.pem"
+          chmod 600 "$WORKDIR/key.pem"
+
+          # JWT を組み立てて署名し、アクセストークンと交換する。
+          b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+          HEADER='{"alg":"RS256","typ":"JWT"}'
+          NOW="$(date +%s)"
+          EXP="$((NOW + 3600))"
+          CLAIMS="$(printf '{"iss":"%s","scope":"https://www.googleapis.com/auth/chromewebstore","aud":"https://oauth2.googleapis.com/token","iat":%s,"exp":%s}' "$CLIENT_EMAIL" "$NOW" "$EXP")"
+          SEG1="$(printf '%s' "$HEADER" | b64url)"
+          SEG2="$(printf '%s' "$CLAIMS" | b64url)"
+          SIG="$(printf '%s' "$SEG1.$SEG2" | openssl dgst -sha256 -sign "$WORKDIR/key.pem" -binary | b64url)"
+          ASSERTION="$SEG1.$SEG2.$SIG"
+          TOKEN="$(curl -sS -X POST 'https://oauth2.googleapis.com/token' \
+            --data-urlencode 'grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer' \
+            --data-urlencode "assertion=$ASSERTION" \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])')"
+          if [ -z "$TOKEN" ]; then
+            echo 'Failed to obtain access token' >&2
+            exit 1
+          fi
+
+          # v2 API: 審査状態確認 → ZIP アップロード → 状態確認 → 公開申請
+          # 審査中（PENDING_REVIEW）の場合はストア提出のみスキップする。
+          # GitHub Release 作成は継続するため、ここでは exit 0 で正常終了させる。
+          # fetchStatus の取得に失敗した場合は空扱いとし、従来通り upload へ進む（安全側）。
+          STATUS_RESP="$(curl -sS -X GET \
+            "https://chromewebstore.googleapis.com/v2/publishers/${PUBLISHER_ID}/items/${EXTENSION_ID}:fetchStatus" \
+            -H "Authorization: Bearer $TOKEN" || echo '{}')"
+          SUBMITTED_STATE="$(printf '%s' "$STATUS_RESP" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("submittedItemRevisionStatus",{}).get("state",""))' 2>/dev/null || echo '')"
+          if [ "$SUBMITTED_STATE" = 'PENDING_REVIEW' ]; then
+            echo 'Submission is pending review, skipping upload/publish'
+            exit 0
+          fi
+          echo "Submitted state: ${SUBMITTED_STATE:-unknown}"
+
+          UPLOAD_RESP="$(curl -sS -X POST \
+            "https://chromewebstore.googleapis.com/upload/v2/publishers/${PUBLISHER_ID}/items/${EXTENSION_ID}:upload" \
+            -H "Authorization: Bearer $TOKEN" \
+            --data-binary "@$ZIP")"
+          UPLOAD_STATE="$(printf '%s' "$UPLOAD_RESP" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("uploadState", ""))')"
+          # v2 API の uploadState は SUCCEEDED が成功値（v1 の SUCCESS とは異なる）。
+          # API 実測値に基づく（2026-09-18 の実行で SUCCEEDED を確認）。
+          if [ "$UPLOAD_STATE" != 'SUCCEEDED' ] && [ "$UPLOAD_STATE" != 'SUCCESS' ]; then
+            echo "Upload failed: $UPLOAD_RESP" >&2
+            exit 1
+          fi
+          echo "Upload state: $UPLOAD_STATE"
+
+          PUBLISH_RESP="$(curl -sS -X POST \
+            "https://chromewebstore.googleapis.com/v2/publishers/${PUBLISHER_ID}/items/${EXTENSION_ID}:publish" \
+            -H "Authorization: Bearer $TOKEN")"
+          echo "Publish response: $PUBLISH_RESP"
+          printf '%s' "$PUBLISH_RESP" | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if d.get("status") in ("OK",) or "error" not in d else 1)' \
+            || { echo 'Publish request was rejected' >&2; exit 1; }
+          echo 'Submitted to Chrome Web Store API v2'
